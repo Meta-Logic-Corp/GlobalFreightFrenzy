@@ -67,6 +67,8 @@ OCEAN_DIRECT_EDGES = set()
 DISPATCH_STATE = {
     "vehicle_plans": {},
     "hub_vehicles": {},
+    "last_undelivered_count": None,
+    "stalled_ticks": 0,
 }
 
 
@@ -105,6 +107,7 @@ class Hub:
         )
 
 
+
 def distance_km(a, b):
     return haversine_distance_meters(a, b) / 1000.0
 
@@ -130,7 +133,126 @@ def spawn_plus_move_cost(start, end, vehicle_name, include_base_cost=True):
 
 def delivered_value_for_box_count(box_count):
     return 120.0 * float(box_count)
+def soft_air_penalty(vehicle_name, box_count, route_distance_total_km, cheaper_surface_candidates, emergency_mode=False):
+    penalty = 0.0
+    reasons = []
 
+    if vehicle_name == "Drone":
+        if cheaper_surface_candidates and not emergency_mode:
+            penalty += 6000.0
+            reasons.append("surface_available_for_drone")
+        if box_count > 3 and not emergency_mode:
+            penalty += 4000.0
+            reasons.append("drone_box_count_high")
+        if route_distance_total_km > 100.0:
+            penalty += 8000.0
+            reasons.append("drone_route_too_long")
+
+    elif vehicle_name == "Airplane":
+        if cheaper_surface_candidates and not emergency_mode:
+            penalty += 5000.0
+            reasons.append("surface_available_for_plane")
+        if route_distance_total_km < 1800.0 and not emergency_mode:
+            penalty += 4000.0
+            reasons.append("plane_route_too_short")
+        if box_count < 25 and not emergency_mode:
+            penalty += 3500.0
+            reasons.append("plane_box_count_too_low")
+
+    return penalty, reasons
+
+def update_stall_state(boxes):
+    undelivered_count = sum(1 for b in boxes.values() if not b["delivered"])
+
+    last = DISPATCH_STATE.get("last_undelivered_count")
+    if last is not None and undelivered_count >= last:
+        DISPATCH_STATE["stalled_ticks"] += 1
+    else:
+        DISPATCH_STATE["stalled_ticks"] = 0
+
+    DISPATCH_STATE["last_undelivered_count"] = undelivered_count
+    return DISPATCH_STATE["stalled_ticks"] >= 8
+
+
+def rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+    cargo_ids = list(vehicle["cargo"])
+    if not cargo_ids:
+        return False
+
+    vehicle_name = normalize_vehicle_name(vehicle["vehicle_type"])
+    current_location = vehicle["location"]
+
+    destination_to_box_ids = {}
+
+    for box_id in cargo_ids:
+        box = boxes.get(box_id)
+        if box is None or box["delivered"]:
+            continue
+        destination_to_box_ids.setdefault(box["destination"], []).append(box_id)
+
+    if not destination_to_box_ids:
+        DISPATCH_STATE["vehicle_plans"][vehicle_id] = {
+            "phase": "idle",
+            "hub_location": current_location,
+            "pickup_location": current_location,
+            "vehicle_name": vehicle_name,
+            "stops": [],
+            "current_stop_index": 0,
+        }
+        return False
+
+    reachable = []
+    for dest, box_ids in destination_to_box_ids.items():
+        if is_route_allowed(current_location, dest, vehicle_name):
+            reachable.append({
+                "location": dest,
+                "box_ids": box_ids,
+                "distance": distance_km(current_location, dest),
+            })
+
+    if not reachable:
+        log(
+            "CARGO_REPLAN_FAIL",
+            "vehicle_id=", vehicle_id,
+            "vehicle=", vehicle_name,
+            "location=", current_location,
+            "reason=no_reachable_cargo_destination",
+            "destinations=", list(destination_to_box_ids.keys()),
+        )
+        return False
+
+    reachable.sort(key=lambda x: x["distance"])
+
+    DISPATCH_STATE["vehicle_plans"][vehicle_id] = {
+        "phase": "to_dropoff",
+        "hub_location": current_location,
+        "pickup_location": current_location,
+        "vehicle_name": vehicle_name,
+        "stops": [{"location": r["location"], "box_ids": list(r["box_ids"])} for r in reachable],
+        "current_stop_index": 0,
+    }
+
+    first_stop = reachable[0]["location"]
+    try:
+        sim_state.move_vehicle(vehicle_id, first_stop)
+        log(
+            "CARGO_REPLAN_OK",
+            "vehicle_id=", vehicle_id,
+            "vehicle=", vehicle_name,
+            "from=", current_location,
+            "to=", first_stop,
+            "remaining_stops=", [r["location"] for r in reachable],
+        )
+        return True
+    except ValueError as e:
+        log(
+            "CARGO_REPLAN_MOVE_FAIL",
+            "vehicle_id=", vehicle_id,
+            "vehicle=", vehicle_name,
+            "target=", first_stop,
+            "error=", e,
+        )
+        return False
 
 def estimate_event_penalty(vehicle_name, active_events):
     mode = VEHICLE_STATS[vehicle_name]["mode"]
@@ -492,6 +614,7 @@ def compute_candidate_costs(
     }
 
 
+
 def score_cluster_route_details(
     vehicle_start,
     pickup_location,
@@ -499,6 +622,7 @@ def score_cluster_route_details(
     vehicle_name,
     active_events=None,
     include_base_cost=True,
+    emergency_mode=False,
 ):
     active_events = active_events or []
 
@@ -507,37 +631,37 @@ def score_cluster_route_details(
         return None
 
     if not is_route_allowed(vehicle_start, pickup_location, vehicle_name):
+        log(
+            "CANDIDATE_FAIL",
+            "hub=", pickup_location,
+            "vehicle=", vehicle_name,
+            "reason=start_to_pickup_not_allowed",
+        )
         return None
 
     current = pickup_location
     for stop in stops:
         if not is_route_allowed(current, stop["location"], vehicle_name):
+            log(
+                "CANDIDATE_FAIL",
+                "hub=", pickup_location,
+                "vehicle=", vehicle_name,
+                "reason=route_leg_not_allowed",
+                "from=", current,
+                "to=", stop["location"],
+            )
             return None
         current = stop["location"]
 
     box_count = len(selected_boxes)
     route_stops_only = [s["location"] for s in stops]
-    cheaper_surface_candidates = []
 
+    cheaper_surface_candidates = []
     for surface_vehicle in ("SemiTruck", "Train", "CargoShip"):
         if surface_vehicle == vehicle_name:
             continue
         if route_is_fully_allowed(pickup_location, route_stops_only, surface_vehicle):
             cheaper_surface_candidates.append(surface_vehicle)
-
-    gate_ok, gate_reasons = airplane_hard_gate(
-        vehicle_name=vehicle_name,
-        box_count=box_count,
-        route_distance_total_km=route_distance_km(route_stops_only, pickup_location),
-        cheaper_surface_candidates=cheaper_surface_candidates,
-    )
-    if not gate_ok:
-        return {
-            "vehicle": vehicle_name,
-            "rejected": True,
-            "reject_reasons": gate_reasons,
-            "score": float("-inf"),
-        }
 
     cost_details = compute_candidate_costs(
         vehicle_start=vehicle_start,
@@ -550,12 +674,23 @@ def score_cluster_route_details(
         include_base_cost=include_base_cost,
     )
 
+    air_penalty, air_penalty_reasons = soft_air_penalty(
+        vehicle_name=vehicle_name,
+        box_count=box_count,
+        route_distance_total_km=cost_details["total_route_distance_km"],
+        cheaper_surface_candidates=cheaper_surface_candidates,
+        emergency_mode=emergency_mode,
+    )
+
+    total_cost = cost_details["total_cost"] + air_penalty
     delivered_value = delivered_value_for_box_count(box_count)
-    total_cost = cost_details["total_cost"]
     net_value = delivered_value - total_cost
     cost_per_box = total_cost / max(1, box_count)
 
-    score = net_value - (4.0 * cost_per_box)
+    if emergency_mode:
+        score = net_value - (2.0 * cost_per_box)
+    else:
+        score = net_value - (4.0 * cost_per_box)
 
     return {
         "vehicle": vehicle_name,
@@ -571,12 +706,15 @@ def score_cluster_route_details(
         "cheaper_surface_candidates": cheaper_surface_candidates,
         "rejected": False,
         "reject_reasons": [],
+        "air_penalty": air_penalty,
+        "air_penalty_reasons": air_penalty_reasons,
+        "emergency_mode": emergency_mode,
         "score": score,
         **cost_details,
+        "total_cost": total_cost,
     }
 
-
-def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehicle_names=None):
+def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehicle_names=None, emergency_mode=False):
     active_events = active_events or []
     clusters = cluster_destinations(hub.destination_boxes)
     start_location = hub.location if vehicle_start is None else vehicle_start
@@ -598,23 +736,22 @@ def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehi
                 vehicle_name=vehicle_name,
                 active_events=active_events,
                 include_base_cost=True,
+                emergency_mode=emergency_mode,
             )
 
             if details is None:
                 continue
 
-            if details.get("rejected"):
-                log(
-                    "CANDIDATE_REJECT",
-                    "hub=", hub.location,
-                    "vehicle=", vehicle_name,
-                    "reasons=", details.get("reject_reasons"),
-                )
-                continue
-
             candidates.append(details)
 
         if not candidates:
+            log(
+                "HUB_CLUSTER_NO_ROUTE",
+                "hub=", hub.location,
+                "cluster_center=", cluster["center"],
+                "emergency_mode=", emergency_mode,
+                "cluster_box_count=", len(cluster["boxes"]),
+            )
             continue
 
         candidates.sort(key=lambda d: (d["score"], -d["total_cost"]), reverse=True)
@@ -623,8 +760,16 @@ def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehi
         if best is None or cluster_best["score"] > best["score"]:
             best = cluster_best
 
-    return best
+    if best is None and not emergency_mode:
+        return best_route_for_hub(
+            hub,
+            active_events=active_events,
+            vehicle_start=vehicle_start,
+            allowed_vehicle_names=allowed_vehicle_names,
+            emergency_mode=True,
+        )
 
+    return best
 
 def build_hubs(boxes):
     hubs = {}
@@ -643,16 +788,21 @@ def build_hubs(boxes):
     return hubs
 
 
-def refresh_hub_scores(hubs, active_events):
+def refresh_hub_scores(hubs, active_events, emergency_mode=False):
     for hub in hubs.values():
-        best = best_route_for_hub(hub, active_events=active_events)
+        best = best_route_for_hub(hub, active_events=active_events, emergency_mode=emergency_mode)
         if best is None:
             hub.score = float("-inf")
             hub.score_details = {}
+            log(
+                "HUB_NO_ROUTE",
+                "hub=", hub.location,
+                "cargo_count=", hub.cargo_count,
+                "emergency_mode=", emergency_mode,
+            )
         else:
             hub.score = best["score"]
             hub.score_details = best
-
 
 def at_location(a, b, threshold_m=_PROXIMITY_M):
     return distance_m(a, b) <= threshold_m
@@ -715,10 +865,10 @@ def claim_hub_for_vehicle(hub_location, vehicle_id):
     DISPATCH_STATE["hub_vehicles"][hub_location] = vehicle_id
 
 
-def try_create_best_vehicle(sim_state, hub, active_events):
-    best = best_route_for_hub(hub, active_events=active_events)
+def try_create_best_vehicle(sim_state, hub, active_events, emergency_mode=False):
+    best = best_route_for_hub(hub, active_events=active_events, emergency_mode=emergency_mode)
     if best is None:
-        log("CREATE_SKIP", "hub=", hub.location, "reason=no_best_route")
+        log("CREATE_SKIP", "hub=", hub.location, "reason=no_best_route", "emergency_mode=", emergency_mode)
         return None
 
     vehicle_name = best["vehicle"]
@@ -739,7 +889,10 @@ def try_create_best_vehicle(sim_state, hub, active_events):
             "cost_per_box=", best["cost_per_box"],
             "net_value=", best["net_value"],
             "route_km=", best["total_route_distance_km"],
+            "air_penalty=", best.get("air_penalty"),
+            "air_penalty_reasons=", best.get("air_penalty_reasons"),
             "surface_candidates=", best.get("cheaper_surface_candidates"),
+            "emergency_mode=", best.get("emergency_mode"),
         )
         return vehicle_id
     except ValueError as e:
@@ -747,7 +900,7 @@ def try_create_best_vehicle(sim_state, hub, active_events):
         return None
 
 
-def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle, hubs, active_events):
+def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle, hubs, active_events, emergency_mode=False):
     vehicle_location = vehicle["location"]
     vehicle_name = normalize_vehicle_name(vehicle["vehicle_type"])
     best_overall = None
@@ -762,6 +915,7 @@ def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle,
             active_events=active_events,
             vehicle_start=vehicle_location,
             allowed_vehicle_names=[vehicle_name],
+            emergency_mode=emergency_mode,
         )
 
         if best is None:
@@ -778,6 +932,7 @@ def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle,
             "vehicle=", vehicle_name,
             "location=", vehicle_location,
             "reason=no_reachable_hub",
+            "emergency_mode=", emergency_mode,
         )
         return False
 
@@ -795,6 +950,7 @@ def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle,
         "cost_per_box=", best_overall["cost_per_box"],
         "boxes=", best_overall["box_count"],
         "stops=", [s["location"] for s in best_overall["stops"]],
+        "emergency_mode=", best_overall.get("emergency_mode"),
     )
 
     if not at_location(vehicle_location, best_hub.location):
@@ -805,6 +961,7 @@ def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle,
             log("MOVE_TO_PICKUP_FAIL", "vehicle_id=", vehicle_id, "target=", best_hub.location, "error=", e)
 
     return True
+
 
 
 def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
@@ -880,6 +1037,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
             first_stop = plan["stops"][0]["location"]
 
             if not is_route_allowed(pickup_location, first_stop, vehicle_name):
+                if list(vehicle["cargo"]):
+                    if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                        return
                 plan["phase"] = "idle"
                 clear_vehicle_hub_claim(vehicle_id)
                 log("PLAN_IDLE_BAD_ROUTE_FIRST_STOP", "vehicle_id=", vehicle_id, "from=", pickup_location, "to=", first_stop)
@@ -890,6 +1050,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
                 sim_state.move_vehicle(vehicle_id, first_stop)
                 log("MOVE_TO_FIRST_STOP", "vehicle_id=", vehicle_id, "target=", first_stop)
             except ValueError as e:
+                if list(vehicle["cargo"]):
+                    if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                        return
                 plan["phase"] = "idle"
                 clear_vehicle_hub_claim(vehicle_id)
                 log("MOVE_TO_FIRST_STOP_FAIL", "vehicle_id=", vehicle_id, "target=", first_stop, "error=", e)
@@ -898,6 +1061,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
                 sim_state.move_vehicle(vehicle_id, pickup_location)
                 log("MOVE_TO_PICKUP_CONTINUE", "vehicle_id=", vehicle_id, "target=", pickup_location)
             except ValueError as e:
+                if list(vehicle["cargo"]):
+                    if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                        return
                 plan["phase"] = "idle"
                 clear_vehicle_hub_claim(vehicle_id)
                 log("MOVE_TO_PICKUP_CONTINUE_FAIL", "vehicle_id=", vehicle_id, "target=", pickup_location, "error=", e)
@@ -916,6 +1082,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
 
         prev_location = pickup_location if idx == 0 else plan["stops"][idx - 1]["location"]
         if not is_route_allowed(prev_location, stop_location, vehicle_name):
+            if list(vehicle["cargo"]):
+                if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                    return
             plan["phase"] = "idle"
             clear_vehicle_hub_claim(vehicle_id)
             log("PLAN_IDLE_BAD_ROUTE_STOP", "vehicle_id=", vehicle_id, "from=", prev_location, "to=", stop_location)
@@ -951,6 +1120,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
 
             next_stop = plan["stops"][plan["current_stop_index"]]["location"]
             if not is_route_allowed(stop_location, next_stop, vehicle_name):
+                if list(vehicle["cargo"]):
+                    if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                        return
                 plan["phase"] = "idle"
                 clear_vehicle_hub_claim(vehicle_id)
                 log("PLAN_IDLE_BAD_ROUTE_NEXT", "vehicle_id=", vehicle_id, "from=", stop_location, "to=", next_stop)
@@ -960,6 +1132,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
                 sim_state.move_vehicle(vehicle_id, next_stop)
                 log("MOVE_TO_NEXT_STOP", "vehicle_id=", vehicle_id, "target=", next_stop)
             except ValueError as e:
+                if list(vehicle["cargo"]):
+                    if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                        return
                 plan["phase"] = "idle"
                 clear_vehicle_hub_claim(vehicle_id)
                 log("MOVE_TO_NEXT_STOP_FAIL", "vehicle_id=", vehicle_id, "target=", next_stop, "error=", e)
@@ -968,6 +1143,9 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
                 sim_state.move_vehicle(vehicle_id, stop_location)
                 log("MOVE_TO_DROPOFF_CONTINUE", "vehicle_id=", vehicle_id, "target=", stop_location)
             except ValueError as e:
+                if list(vehicle["cargo"]):
+                    if rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
+                        return
                 plan["phase"] = "idle"
                 clear_vehicle_hub_claim(vehicle_id)
                 log("MOVE_TO_DROPOFF_CONTINUE_FAIL", "vehicle_id=", vehicle_id, "target=", stop_location, "error=", e)
@@ -975,7 +1153,6 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
 
     if plan["phase"] == "idle":
         log("PLAN_IDLE", "vehicle_id=", vehicle_id, "location=", current_location)
-
 
 def step(sim_state):
     tick = sim_state.tick
@@ -997,8 +1174,12 @@ def step(sim_state):
         active_events = []
         log("get_active_events endpoint does not exist")
 
+    emergency_mode = update_stall_state(boxes)
+    log("STALLED_TICKS", DISPATCH_STATE["stalled_ticks"])
+    log("EMERGENCY_MODE", emergency_mode)
+
     hubs = build_hubs(boxes)
-    refresh_hub_scores(hubs, active_events)
+    refresh_hub_scores(hubs, active_events, emergency_mode=emergency_mode)
 
     log("HUB_COUNT", len(hubs))
     for location, hub in hubs.items():
@@ -1011,6 +1192,7 @@ def step(sim_state):
             "best_boxes=", hub.score_details.get("box_count"),
             "best_cost=", hub.score_details.get("total_cost"),
             "best_cost_per_box=", hub.score_details.get("cost_per_box"),
+            "best_air_penalty=", hub.score_details.get("air_penalty"),
             "best_stops=", [s["location"] for s in hub.score_details.get("stops", [])],
         )
 
@@ -1030,7 +1212,14 @@ def step(sim_state):
     for vehicle_id, vehicle in vehicles.items():
         plan = DISPATCH_STATE["vehicle_plans"].get(vehicle_id)
         if plan is None or plan.get("phase") == "idle":
-            assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle, hubs, active_events)
+            assign_plan_to_vehicle_from_current_location(
+                sim_state,
+                vehicle_id,
+                vehicle,
+                hubs,
+                active_events,
+                emergency_mode=emergency_mode,
+            )
 
     vehicles = sim_state.get_vehicles()
     sorted_hubs = sorted(hubs.values(), key=lambda h: h.score, reverse=True)
@@ -1048,15 +1237,21 @@ def step(sim_state):
             assigned_vehicle_id = None
 
         if assigned_vehicle_id is None:
-            log("HUB_UNCLAIMED", "hub=", hub.location, "cargo_count=", hub.cargo_count, "score=", hub.score)
-            try_create_best_vehicle(sim_state, hub, active_events)
+            log(
+                "HUB_UNCLAIMED",
+                "hub=", hub.location,
+                "cargo_count=", hub.cargo_count,
+                "score=", hub.score,
+                "emergency_mode=", emergency_mode,
+            )
+            try_create_best_vehicle(sim_state, hub, active_events, emergency_mode=emergency_mode)
             continue
 
         plan = DISPATCH_STATE["vehicle_plans"].get(assigned_vehicle_id)
         if plan is None:
             log("HUB_PLAN_MISSING", "hub=", hub.location, "vehicle_id=", assigned_vehicle_id)
             DISPATCH_STATE["hub_vehicles"].pop(hub.location, None)
-            try_create_best_vehicle(sim_state, hub, active_events)
+            try_create_best_vehicle(sim_state, hub, active_events, emergency_mode=emergency_mode)
             continue
 
         log(
