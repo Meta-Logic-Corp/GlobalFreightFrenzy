@@ -144,29 +144,7 @@ def step(sim_state):
                             except ValueError:
                                 pass
                             
-                            # Try airplane (FIXED)
-                            if not ship_spawned:
-                                plane_spawned = False
-                                
-                                try:
-                                    new_vid = sim_state.create_vehicle(VehicleType.Airplane, loc)
-                                    sim_state.load_vehicle(new_vid, cargo_to_transfer)
-                                    sim_state.move_vehicle(new_vid, target_dest)
-                                    plane_spawned = True
-                                except ValueError:
-                                    pass
-                                
-                                if not plane_spawned and nearest_hub:
-                                    try:
-                                        new_vid = sim_state.create_vehicle(VehicleType.Airplane, nearest_hub)
-                                        sim_state.load_vehicle(new_vid, cargo_to_transfer)
-                                        sim_state.move_vehicle(new_vid, target_dest)
-                                        plane_spawned = True
-                                    except ValueError:
-                                        pass
-                                
-                                if not plane_spawned:
-                                    sim_state.move_vehicle(vid, target_dest)
+                           sim_state.move_vehicle(vid, target_dest)
                         else:
                             if num_boxes >= 20:
                                 try:
