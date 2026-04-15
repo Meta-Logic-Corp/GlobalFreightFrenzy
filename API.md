@@ -192,6 +192,40 @@ Each event dict contains:
 | `radius_m` | `float` | traffic / optional oceanic | Radius of the affected area in metres |
 | `speed_multiplier` | `float` | traffic only | Speed fraction applied to ground vehicles (default `0.25`) |
 
+---
+
+### `get_shipping_hubs() → tuple[(float, float), ...]`
+
+Returns an immutable snapshot of configured shipping hub coordinates.
+
+```python
+hubs = sim_state.get_shipping_hubs()
+for lat, lon in hubs:
+    print(lat, lon)
+```
+
+---
+
+### `get_airports() → tuple[(float, float), ...]`
+
+Returns an immutable snapshot of airport coordinates used for airport-based rules.
+When no `airports` are defined in bootstrap, this returns the fallback hub locations.
+
+```python
+airports = sim_state.get_airports()
+```
+
+---
+
+### `get_ocean_ports() → tuple[(float, float), ...]`
+
+Returns an immutable snapshot of configured ocean port coordinates.
+If no `ocean_ports` are configured, returns an empty tuple.
+
+```python
+ocean_ports = sim_state.get_ocean_ports()
+```
+
 **Event effects on movement (automatic — no action required):**
 
 | Event type | Affected vehicles | Effect |
@@ -328,4 +362,3 @@ def step(sim_state):
         if event["type"] == "ground_stop_flights":
             print(f"Ground stop in effect — {event['remaining_ticks']} ticks left")
 ```
-...
