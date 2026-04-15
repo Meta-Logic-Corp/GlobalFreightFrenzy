@@ -135,7 +135,7 @@ def step(sim_state):
             elif vtype in [VehicleType.CargoShip, VehicleType.Airplane]:
                 if not is_overseas(loc, target):
                     # Reached land, switch to land vehicle
-                    sim_state.unload_vehicle(vid, v["cargo"])
+                    sim_state.unload_vehicle(vid, ["cargo"])
                     boxes = sim_state.get_boxes()
                     for new_type in [VehicleType.Train, VehicleType.SemiTruck]:
                         try:
