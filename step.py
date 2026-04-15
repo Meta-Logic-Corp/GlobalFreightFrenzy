@@ -112,25 +112,27 @@ def step(sim_state):
             # Check if we need to switch vehicle types
             if vtype in [VehicleType.SemiTruck, VehicleType.Train]:
                 if is_overseas(loc, target):
-                    # Need to go to port/airport first
-                    # Find nearest hub to transfer
-                    nearest = min(hubs, key=lambda h: distance_m(loc, h))
-                    if distance_m(loc, nearest) > 1000:
-                        sim_state.move_vehicle(vid, nearest)
-                    else:
-                        # At hub, unload and create ship/plane
-                        sim_state.unload_vehicle(vid, v["cargo"])
-                        boxes = sim_state.get_boxes()
-                        for new_type in [VehicleType.CargoShip, VehicleType.Airplane]:
-                            try:
-                                new_vid = sim_state.create_vehicle(new_type, loc)
-                                sim_state.load_vehicle(new_vid, v["cargo"])
-                                sim_state.move_vehicle(new_vid, target)
-                                break
-                            except ValueError:
-                                continue
+                # Find nearest hub to transfer
+                nearest = min(hubs, key=lambda h: distance_m(loc, h))
+                if distance_m(loc, nearest) > 1000:
+                    sim_state.move_vehicle(vid, nearest)
                 else:
-                    sim_state.move_vehicle(vid, target)
+                    # At hub, unload and create ship/plane
+                    cargo_copy = list(v["cargo"])  # SAVE CARGO BEFORE UNLOADING
+                    sim_state.unload_vehicle(vid, v["cargo"])
+                    boxes = sim_state.get_boxes()
+            
+                    # Try to create new vehicle at the SAME location
+                    for new_type in [VehicleType.CargoShip, VehicleType.Airplane]:
+                        try:
+                            new_vid = sim_state.create_vehicle(new_type, loc)
+                            sim_state.load_vehicle(new_vid, cargo_copy)  # USE SAVED CARGO
+                            sim_state.move_vehicle(new_vid, target)
+                            break
+                except ValueError:
+                    continue
+    else:
+        sim_state.move_vehicle(vid, target)
             
             elif vtype in [VehicleType.CargoShip, VehicleType.Airplane]:
                 if not is_overseas(loc, target):
