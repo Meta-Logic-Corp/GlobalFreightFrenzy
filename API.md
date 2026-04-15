@@ -67,10 +67,12 @@ sim_state.load_vehicle(vehicle_id, ["box_001", "box_002"])
 - Box must not already be on a vehicle
 - Box must not already be delivered
 - Vehicle must have remaining capacity
+- `Airplane` and `Drone` must be within **5 000 m** of an airport
+- `CargoShip` must be within **5 000 m** of an ocean port (if `ocean_ports` are configured)
 
 **Raises**
 - `KeyError` — unknown `vehicle_id` or box ID
-- `ValueError` — proximity, status, or capacity constraint violated
+- `ValueError` — proximity, status, capacity, or vehicle/facility rules are violated
 
 ---
 
@@ -89,7 +91,7 @@ sim_state.unload_vehicle(vehicle_id, ["box_001"])
 
 **Raises**
 - `KeyError` — unknown `vehicle_id` or box ID
-- `ValueError` — a box is not currently on `vehicle_id`
+- `ValueError` — a box is not currently on `vehicle_id`, or vehicle/facility rules are violated
 
 ---
 
@@ -224,7 +226,45 @@ Moving a vehicle through its **forbidden terrain** (e.g. a SemiTruck over water)
 |--------------|-------------------|
 | `SemiTruck`, `Train` | Within **5 000 m** of a shipping hub |
 | `Airplane`, `Drone` | Within **5 000 m** of an airport (falls back to hub locations if no airports defined in bootstrap) |
-| `CargoShip` | Must be over **water** (ocean/sea) |
+| `CargoShip` | Must be over **water** (ocean/sea), and within **5 000 m** of an ocean port when `ocean_ports` are defined |
+
+Facility operation rules for cargo handling (`load_vehicle` / `unload_vehicle`):
+
+- `Airplane` and `Drone` can only load/unload cargo within **5 000 m** of an airport.
+- `CargoShip` can only load/unload cargo within **5 000 m** of an ocean port when `ocean_ports` are defined.
+
+---
+
+## Bootstrap Fields For Facility Rules
+
+These bootstrap fields drive spawn and cargo-operation restrictions:
+
+- `airports`: optional list of airport locations used by `Airplane` and `Drone`.
+- `ocean_ports`: optional list of ocean-port locations used by `CargoShip`.
+
+If `airports` is omitted or empty, shipping hub locations are used as fallback airport locations.
+If `ocean_ports` is omitted or empty, cargo ships still must spawn over water, but no port-distance check is enforced.
+
+Example:
+
+```json
+{
+    "airports": [
+        {
+            "id": "airport_lax",
+            "name": "Los Angeles International Airport",
+            "location": { "lat": 33.9425, "lon": -118.4081 }
+        }
+    ],
+    "ocean_ports": [
+        {
+            "id": "port_la",
+            "name": "Port of Los Angeles",
+            "location": { "lat": 33.7361, "lon": -118.2639 }
+        }
+    ]
+}
+```
 
 To handle scenarios where not every vehicle type is valid at a given location, try each type and catch `ValueError`:
 
