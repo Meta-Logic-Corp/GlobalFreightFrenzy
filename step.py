@@ -67,7 +67,7 @@ def step(sim_state):
                 sim_state.unload_vehicle(vid, to_unload)
                 boxes = sim_state.get_boxes()
     
-    # MANAGE VEHICLES (including transfers)
+    # MANAGE VEHICLES (with proper transloading)
     for vid, v in vehicles.items():
         if v["destination"] is not None:
             continue
@@ -75,7 +75,7 @@ def step(sim_state):
         vtype = VehicleType[v["vehicle_type"]]
         capacity_left = CAPACITY[vtype] - len(v["cargo"])
         
-        # Load
+        # Load available boxes at current location
         if capacity_left > 0:
             loadable = [bid for bid, box in boxes.items() if not box["delivered"] and box["vehicle_id"] is None and haversine_distance_meters(loc, box["location"]) <= _PROXIMITY_M]
             if loadable:
@@ -88,12 +88,36 @@ def step(sim_state):
             dest = boxes[first_bid]["destination"]
             num_boxes = len(v["cargo"])
             
-            # If this vehicle is not suitable for the whole route, go to transfer point
-            if (vtype in [VehicleType.SemiTruck, VehicleType.Train] and is_water_crossing(loc, dest)) or \
-               (vtype in [VehicleType.CargoShip, VehicleType.Airplane] and not is_water_crossing(loc, dest)):
-                # Need to transfer. Go to nearest appropriate facility.
-                if vtype in [VehicleType.SemiTruck, VehicleType.Train]:
-                    # Find nearest port or airport
+            # Check if we are at a transfer facility
+            at_port = any(haversine_distance_meters(loc, p) <= 5000 for p in _ALL_PORTS)
+            at_airport = any(haversine_distance_meters(loc, a) <= 5000 for a in _ALL_AIRPORTS)
+            
+            # Land vehicle with overseas destination
+            if vtype in [VehicleType.SemiTruck, VehicleType.Train] and is_water_crossing(loc, dest):
+                if at_port or at_airport:
+                    # Transfer to ship/plane
+                    cargo_copy = list(v["cargo"])
+                    dest_copy = dest
+                    sim_state.unload_vehicle(vid, cargo_copy)
+                    boxes = sim_state.get_boxes()
+                    if at_port and len(cargo_copy) <= CAPACITY[VehicleType.CargoShip]:
+                        try:
+                            new_vid = sim_state.create_vehicle(VehicleType.CargoShip, loc)
+                            sim_state.load_vehicle(new_vid, cargo_copy)
+                            sim_state.move_vehicle(new_vid, dest_copy)
+                        except ValueError:
+                            pass
+                    elif at_airport and len(cargo_copy) <= CAPACITY[VehicleType.Airplane]:
+                        try:
+                            new_vid = sim_state.create_vehicle(VehicleType.Airplane, loc)
+                            sim_state.load_vehicle(new_vid, cargo_copy)
+                            sim_state.move_vehicle(new_vid, dest_copy)
+                        except ValueError:
+                            pass
+                    else:
+                        sim_state.move_vehicle(vid, dest_copy)
+                else:
+                    # Go to nearest port or airport
                     nearest_port = min(_ALL_PORTS, key=lambda p: haversine_distance_meters(loc, p)) if _ALL_PORTS else None
                     nearest_airport = min(_ALL_AIRPORTS, key=lambda a: haversine_distance_meters(loc, a)) if _ALL_AIRPORTS else None
                     port_dist = haversine_distance_meters(loc, nearest_port) if nearest_port else float('inf')
@@ -103,15 +127,40 @@ def step(sim_state):
                         sim_state.move_vehicle(vid, transfer_target)
                     else:
                         sim_state.move_vehicle(vid, dest)
+            
+            # Water/air vehicle: if destination no longer overseas (reached land)
+            elif vtype in [VehicleType.CargoShip, VehicleType.Airplane] and not is_water_crossing(loc, dest):
+                cargo_copy = list(v["cargo"])
+                dest_copy = dest
+                sim_state.unload_vehicle(vid, cargo_copy)
+                boxes = sim_state.get_boxes()
+                # Transfer to train or truck
+                if len(cargo_copy) >= 20 and len(cargo_copy) <= CAPACITY[VehicleType.Train]:
+                    try:
+                        new_vid = sim_state.create_vehicle(VehicleType.Train, loc)
+                        sim_state.load_vehicle(new_vid, cargo_copy)
+                        sim_state.move_vehicle(new_vid, dest_copy)
+                    except ValueError:
+                        try:
+                            new_vid = sim_state.create_vehicle(VehicleType.SemiTruck, loc)
+                            sim_state.load_vehicle(new_vid, cargo_copy)
+                            sim_state.move_vehicle(new_vid, dest_copy)
+                        except ValueError:
+                            sim_state.move_vehicle(vid, dest_copy)
                 else:
-                    # Air/water vehicle has reached land, go to nearest hub
-                    nearest_hub = min(hubs, key=lambda h: haversine_distance_meters(loc, h))
-                    sim_state.move_vehicle(vid, nearest_hub)
+                    try:
+                        new_vid = sim_state.create_vehicle(VehicleType.SemiTruck, loc)
+                        sim_state.load_vehicle(new_vid, cargo_copy)
+                        sim_state.move_vehicle(new_vid, dest_copy)
+                    except ValueError:
+                        sim_state.move_vehicle(vid, dest_copy)
+            
+            # Normal case
             else:
                 sim_state.move_vehicle(vid, dest)
         
         elif not v["cargo"]:
-            # Empty: go to nearest box or hub
+            # Empty vehicle: go to nearest box or hub
             nearest = None
             min_dist = float('inf')
             for bid, box in boxes.items():
@@ -138,14 +187,11 @@ def step(sim_state):
                 needs_water = any(is_water_crossing(origin, boxes[bid]["destination"]) for bid in box_ids[:5])
                 
                 if needs_water:
-                    # Do NOT spawn a truck going directly overseas. Instead, spawn a truck that goes to a port/airport.
-                    # Find nearest port and airport
+                    # Spawn a truck to go to nearest port/airport
                     nearest_port = min(_ALL_PORTS, key=lambda p: haversine_distance_meters(origin, p)) if _ALL_PORTS else None
                     nearest_airport = min(_ALL_AIRPORTS, key=lambda a: haversine_distance_meters(origin, a)) if _ALL_AIRPORTS else None
                     port_dist = haversine_distance_meters(origin, nearest_port) if nearest_port else float('inf')
                     airport_dist = haversine_distance_meters(origin, nearest_airport) if nearest_airport else float('inf')
-                    
-                    # Choose the closer facility within reasonable distance (500km)
                     if port_dist < airport_dist and port_dist < 500000:
                         transfer_point = nearest_port
                     elif airport_dist < 500000:
@@ -162,7 +208,7 @@ def step(sim_state):
                             break
                         except ValueError:
                             pass
-                    # Fallback: try to spawn ship/plane directly at origin (if possible)
+                    # Fallback: try to spawn ship/plane directly
                     if num_boxes <= 1000:
                         try:
                             vid = sim_state.create_vehicle(VehicleType.CargoShip, origin)
