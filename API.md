@@ -114,13 +114,23 @@ if sim_state.tick == 0:
 
 ### `sim_state.total_cost → float`
 
-Total accumulated cost so far (vehicle creation + per-km movement + loading + terrain penalties).
+Total accumulated cost so far (vehicle creation + per-km movement + loading + terrain penalties + end-of-simulation undelivered-box penalty).
 
 ---
 
 ### `sim_state.terrain_penalty → float`
 
 The portion of `total_cost` that came from terrain violations (vehicles moving through forbidden terrain).
+
+---
+
+### `sim_state.undelivered_box_penalty → float`
+
+Penalty amount applied at simulation end for boxes that were not delivered.
+
+Formula:
+
+`1000 × (number of undelivered boxes at simulation end)`
 
 ---
 
@@ -191,6 +201,40 @@ Each event dict contains:
 | `center` | `(float, float)` | traffic / optional oceanic | Geographic centre of the affected area |
 | `radius_m` | `float` | traffic / optional oceanic | Radius of the affected area in metres |
 | `speed_multiplier` | `float` | traffic only | Speed fraction applied to ground vehicles (default `0.25`) |
+
+---
+
+### `get_shipping_hubs() → tuple[(float, float), ...]`
+
+Returns an immutable snapshot of configured shipping hub coordinates.
+
+```python
+hubs = sim_state.get_shipping_hubs()
+for lat, lon in hubs:
+    print(lat, lon)
+```
+
+---
+
+### `get_airports() → tuple[(float, float), ...]`
+
+Returns an immutable snapshot of airport coordinates used for airport-based rules.
+When no `airports` are defined in bootstrap, this returns the fallback hub locations.
+
+```python
+airports = sim_state.get_airports()
+```
+
+---
+
+### `get_ocean_ports() → tuple[(float, float), ...]`
+
+Returns an immutable snapshot of configured ocean port coordinates.
+If no `ocean_ports` are configured, returns an empty tuple.
+
+```python
+ocean_ports = sim_state.get_ocean_ports()
+```
 
 **Event effects on movement (automatic — no action required):**
 
@@ -290,6 +334,7 @@ for vtype in vehicle_types:
 | Vehicle travels 1 km | `VehicleType.X.value.per_km_cost` |
 | `load_vehicle(...)` with N boxes | N × 1.0 |
 | Vehicle travels 1 km in forbidden terrain | extra `VehicleType.X.value.terrain_penalty_per_km` |
+| End of simulation with U undelivered boxes | U × 1000 |
 
 Lower `total_cost` is better.
 
@@ -328,4 +373,3 @@ def step(sim_state):
         if event["type"] == "ground_stop_flights":
             print(f"Ground stop in effect — {event['remaining_ticks']} ticks left")
 ```
-...
