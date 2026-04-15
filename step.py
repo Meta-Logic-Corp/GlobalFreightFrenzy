@@ -4,7 +4,7 @@ import math
 
 _PROXIMITY_M = 50.0
 
-# Vehicle cost per km
+# Vehicle cost per km (for decision making)
 COST_PER_KM = {
     VehicleType.CargoShip: 0.01,
     VehicleType.Train: 0.02,
@@ -21,58 +21,57 @@ CAPACITY = {
     VehicleType.Drone: 5,
 }
 
-# Facility requirements for loading/unloading
-FACILITY_REQUIRED = {
-    VehicleType.SemiTruck: "hub",
-    VehicleType.Train: "hub",
-    VehicleType.Airplane: "airport",
-    VehicleType.CargoShip: "ocean_port",
-    VehicleType.Drone: "airport",
-}
-
-# Cache
-_dist_cache = {}
-_airports = set()
-_ocean_ports = set()
-_hubs = set()
+# Cache for discovered facilities
+_facilities_cache = {}
+_vehicle_destinations = {}  # Track next destination for vehicles
 
 def distance_m(loc1, loc2):
+    """Cached distance calculation"""
     key = (loc1, loc2) if loc1 < loc2 else (loc2, loc1)
-    if key not in _dist_cache:
-        _dist_cache[key] = haversine_distance_meters(loc1, loc2)
-    return _dist_cache[key]
+    if key not in _facilities_cache:
+        _facilities_cache[key] = haversine_distance_meters(loc1, loc2)
+    return _facilities_cache[key]
 
 def is_overseas(origin, dest):
+    """Quick check if route needs water crossing"""
     dist = distance_m(origin, dest)
     if dist > 500000:
         return True
+    
     o_lat, o_lon = origin
     d_lat, d_lon = dest
+    
+    # Atlantic crossing
     if (o_lon < -60 and d_lon > -10) or (o_lon > -10 and d_lon < -60):
         return abs(o_lat - d_lat) < 50
     return False
 
-def find_nearest_facility(loc, facilities):
-    if not facilities:
-        return None, float('inf')
-    nearest = min(facilities, key=lambda f: distance_m(loc, f))
-    return nearest, distance_m(loc, nearest)
+def best_vehicle(num_boxes, distance_m, is_overseas_route):
+    """Choose cheapest vehicle for the job"""
+    if is_overseas_route:
+        # Overseas: ship cheapest, plane faster but expensive
+        if num_boxes > 100:
+            return VehicleType.CargoShip
+        else:  
+            return VehicleType.Airplane
+    
+    # Land route
+    if num_boxes > 50 and distance_m > 50000:
+        return VehicleType.Train
+    else: 
+        return VehicleType.SemiTruck
 
 def step(sim_state):
-    global _airports, _ocean_ports, _hubs
-    
     tick = sim_state.tick
     vehicles = sim_state.get_vehicles()
     boxes = sim_state.get_boxes()
     
-    # Discover facilities from box locations
+    # Discover hubs from all box locations
+    hubs = set()
     for box in boxes.values():
-        _hubs.add(box["location"])
-        _hubs.add(box["destination"])
-        _airports.add(box["location"])
-        _airports.add(box["destination"])
-        _ocean_ports.add(box["location"])
-        _ocean_ports.add(box["destination"])
+        hubs.add(box["location"])
+        hubs.add(box["destination"])
+    hubs = list(hubs)
     
     # ===== 1. UNLOAD =====
     for vid, v in vehicles.items():
@@ -83,18 +82,18 @@ def step(sim_state):
             ]
             if to_unload:
                 sim_state.unload_vehicle(vid, to_unload)
-                boxes = sim_state.get_boxes()
+                boxes = sim_state.get_boxes()  # Refresh
     
-    # ===== 2. MANAGE VEHICLES =====
+    # ===== 2. MANAGE EXISTING VEHICLES =====
     for vid, v in vehicles.items():
         if v["destination"] is not None:
-            continue
+            continue  # Still moving
         
         loc = v["location"]
         vtype = VehicleType[v["vehicle_type"]]
         capacity_left = CAPACITY[vtype] - len(v["cargo"])
         
-        # Load boxes at current location if possible
+        # Load boxes at current location
         if capacity_left > 0:
             loadable = [
                 bid for bid, box in boxes.items()
@@ -107,58 +106,40 @@ def step(sim_state):
                 boxes = sim_state.get_boxes()
         
         if v["cargo"]:
+            # Get target destination
             target = boxes[v["cargo"][0]]["destination"]
-            facility_needed = FACILITY_REQUIRED.get(vtype, "hub")
             
-            # Check if current location is valid for this vehicle type
-            if facility_needed == "airport":
-                nearest_airport, dist_to_airport = find_nearest_facility(loc, _airports)
-                if dist_to_airport > 5000:  # Not at airport
-                    if nearest_airport:
-                        sim_state.move_vehicle(vid, nearest_airport)
-                    continue
-            
-            elif facility_needed == "ocean_port":
-                nearest_port, dist_to_port = find_nearest_facility(loc, _ocean_ports)
-                if dist_to_port > 5000:  # Not at port
-                    if nearest_port:
-                        sim_state.move_vehicle(vid, nearest_port)
-                    continue
-            
-            # Now handle routing logic
+            # Check if we need to switch vehicle types
             if vtype in [VehicleType.SemiTruck, VehicleType.Train]:
                 if is_overseas(loc, target):
-                    # Need to transfer to ship/plane
-                    # First, go to appropriate facility
-                    nearest_port, port_dist = find_nearest_facility(loc, _ocean_ports)
-                    nearest_airport, airport_dist = find_nearest_facility(loc, _airports)
-                    
-                    # Choose closer facility
-                    if port_dist < airport_dist and port_dist < 50000:
-                        sim_state.move_vehicle(vid, nearest_port)
-                    elif airport_dist < 50000:
-                        sim_state.move_vehicle(vid, nearest_airport)
+                    # Need to go to port/airport first
+                    # Find nearest hub to transfer
+                    nearest = min(hubs, key=lambda h: distance_m(loc, h))
+                    if distance_m(loc, nearest) > 1000:
+                        sim_state.move_vehicle(vid, nearest)
                     else:
-                        # Just go to nearest hub
-                        nearest_hub = min(_hubs, key=lambda h: distance_m(loc, h))
-                        sim_state.move_vehicle(vid, nearest_hub)
+                        # At hub, unload and create ship/plane
+                        sim_state.unload_vehicle(vid, v["cargo"])
+                        boxes = sim_state.get_boxes()
+                        for new_type in [VehicleType.CargoShip, VehicleType.Airplane]:
+                            try:
+                                new_vid = sim_state.create_vehicle(new_type, loc)
+                                sim_state.load_vehicle(new_vid, v["cargo"])
+                                sim_state.move_vehicle(new_vid, target)
+                                break
+                            except ValueError:
+                                continue
                 else:
                     sim_state.move_vehicle(vid, target)
             
             elif vtype in [VehicleType.CargoShip, VehicleType.Airplane]:
                 if not is_overseas(loc, target):
-                    # Reached land, need to transfer to land vehicle
-                    # First, unload cargo
+                    # Reached land, switch to land vehicle
                     sim_state.unload_vehicle(vid, v["cargo"])
                     boxes = sim_state.get_boxes()
-                    
-                    # Find nearest hub for land vehicle
-                    nearest_hub = min(_hubs, key=lambda h: distance_m(loc, h))
-                    
-                    # Create land vehicle at the hub
                     for new_type in [VehicleType.Train, VehicleType.SemiTruck]:
                         try:
-                            new_vid = sim_state.create_vehicle(new_type, nearest_hub)
+                            new_vid = sim_state.create_vehicle(new_type, loc)
                             sim_state.load_vehicle(new_vid, v["cargo"])
                             sim_state.move_vehicle(new_vid, target)
                             break
@@ -168,7 +149,7 @@ def step(sim_state):
                     sim_state.move_vehicle(vid, target)
         
         elif not v["cargo"]:
-            # Empty vehicle - go get boxes
+            # Empty vehicle - go to nearest box or hub
             nearest_box = None
             min_dist = float('inf')
             for bid, box in boxes.items():
@@ -180,9 +161,8 @@ def step(sim_state):
             
             if nearest_box:
                 sim_state.move_vehicle(vid, nearest_box)
-            elif _hubs:
-                nearest_hub = min(_hubs, key=lambda h: distance_m(loc, h))
-                sim_state.move_vehicle(vid, nearest_hub)
+            elif hubs:
+                sim_state.move_vehicle(vid, min(hubs, key=lambda h: distance_m(loc, h)))
     
     # ===== 3. SPAWN NEW VEHICLES =====
     if tick == 0 or (len(vehicles) < 20 and tick % 50 == 0):
@@ -190,71 +170,50 @@ def step(sim_state):
                       if not box["delivered"] and box["vehicle_id"] is None]
         
         if undelivered:
+            # Group by origin
             origin_boxes = defaultdict(list)
             for bid in undelivered:
                 origin_boxes[boxes[bid]["location"]].append(bid)
             
+            # Process largest group first
             for origin, box_ids in sorted(origin_boxes.items(), key=lambda x: -len(x[1])):
                 num_boxes = len(box_ids)
-                target = boxes[box_ids[0]]["destination"]
-                overseas = is_overseas(origin, target)
+                overseas = is_overseas(origin, boxes[box_ids[0]]["destination"])
                 
-                # For overseas routes, check if we're at correct facility
-                if overseas:
-                    # Try to spawn ship or plane if at correct facility
-                    nearest_port, port_dist = find_nearest_facility(origin, _ocean_ports)
-                    if port_dist <= 5000 and num_boxes >= 10:
-                        try:
-                            vid = sim_state.create_vehicle(VehicleType.CargoShip, origin)
-                            to_load = box_ids[:CAPACITY[VehicleType.CargoShip]]
-                            sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, target)
-                            break
-                        except ValueError:
-                            pass
-                    
-                    nearest_airport, airport_dist = find_nearest_facility(origin, _airports)
-                    if airport_dist <= 5000:
-                        try:
-                            vid = sim_state.create_vehicle(VehicleType.Airplane, origin)
-                            to_load = box_ids[:CAPACITY[VehicleType.Airplane]]
-                            sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, target)
-                            break
-                        except ValueError:
-                            pass
-                    
-                    # Not at facility, use truck to get there first
+                # Choose best vehicle
+                vtype = best_vehicle(num_boxes, 0, overseas)
+                
+                # For overseas routes, consider going to port first
+                if overseas and vtype == VehicleType.CargoShip:
+                    # Check if we can spawn ship directly
+                    try:
+                        vid = sim_state.create_vehicle(vtype, origin)
+                        to_load = box_ids[:CAPACITY[vtype]]
+                        sim_state.load_vehicle(vid, to_load)
+                        sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
+                        break
+                    except ValueError:
+                        # Can't spawn ship here, use truck to port
+                        vtype = VehicleType.SemiTruck
+                
+                # Spawn vehicle
+                try:
+                    vid = sim_state.create_vehicle(vtype, origin)
+                    to_load = box_ids[:CAPACITY[vtype]]
+                    sim_state.load_vehicle(vid, to_load)
+                    if to_load:
+                        dest = boxes[to_load[0]]["destination"]
+                        sim_state.move_vehicle(vid, dest)
+                    break
+                except ValueError:
+                    # Fallback to truck
                     try:
                         vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
                         to_load = box_ids[:50]
                         sim_state.load_vehicle(vid, to_load)
-                        # Go to nearest airport/port
-                        if port_dist < airport_dist:
-                            sim_state.move_vehicle(vid, nearest_port)
-                        else:
-                            sim_state.move_vehicle(vid, nearest_airport)
+                        if to_load:
+                            sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
                         break
                     except ValueError:
-                        pass
-                
-                else:
-                    # Land route
-                    if num_boxes >= 20:
-                        try:
-                            vid = sim_state.create_vehicle(VehicleType.Train, origin)
-                            to_load = box_ids[:500]
-                            sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, target)
-                            break
-                        except ValueError:
-                            pass
-                    
-                    try:
-                        vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
-                        to_load = box_ids[:50]
-                        sim_state.load_vehicle(vid, to_load)
-                        sim_state.move_vehicle(vid, target)
-                        break
-                    except ValueError:
+                        continue
                         continue
