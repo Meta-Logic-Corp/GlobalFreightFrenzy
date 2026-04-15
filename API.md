@@ -328,3 +328,4 @@ def step(sim_state):
         if event["type"] == "ground_stop_flights":
             print(f"Ground stop in effect — {event['remaining_ticks']} ticks left")
 ```
+...
