@@ -1,16 +1,63 @@
 from simulator import VehicleType, haversine_distance_meters
 from collections import defaultdict
+import math
 
 _PROXIMITY_M = 50.0
 
-# Cost per km for reference
-# Train: 0.02/km (cheapest for land)
-# SemiTruck: 0.05/km (2.5x more expensive)
+# Define hub/port/airport locations (discovered from boxes)
+WATER_COORDINATES = [
+    # Major crossing points (you can discover these dynamically)
+    (40.7128, -74.0060),   # NYC - Atlantic hub
+    (33.9425, -118.4081),  # LA - Pacific hub
+    (51.5074, -0.1278),    # London
+]
+
+def is_water_crossing(from_loc, to_loc):
+    """Detect if path likely crosses ocean (simplified)"""
+    # Check if distance is very long (>1000km) and crosses major bodies of water
+    dist = haversine_distance_meters(from_loc, to_loc)
+    
+    # Long distance over 500km likely needs water crossing or air
+    if dist > 500000:  # 500km
+        return True
+    
+    # Check lat/lon ranges that indicate ocean crossings
+    from_lat, from_lon = from_loc
+    to_lat, to_lon = to_loc
+    
+    # Crossing Atlantic (East-West between Americas and Europe)
+    if (from_lon < -60 and to_lon > -10) or (from_lon > -10 and to_lon < -60):
+        if abs(from_lat - to_lat) < 50:  # Similar latitude
+            return True
+    
+    # Crossing Pacific
+    if (from_lon < -120 and to_lon > 120) or (from_lon > 120 and to_lon < -120):
+        return True
+    
+    return False
+
+def find_nearest_hub(location, hubs):
+    """Find nearest hub/port/airport to location"""
+    nearest = None
+    min_dist = float('inf')
+    for hub in hubs:
+        dist = haversine_distance_meters(location, hub)
+        if dist < min_dist:
+            min_dist = dist
+            nearest = hub
+    return nearest
 
 def step(sim_state):
     tick = sim_state.tick
     vehicles = sim_state.get_vehicles()
     boxes = sim_state.get_boxes()
+    
+    # Discover hubs from all box locations
+    all_locations = set()
+    for box in boxes.values():
+        all_locations.add(box["location"])
+        all_locations.add(box["destination"])
+    hubs = list(all_locations)
     
     # UNLOAD: Deliver boxes at destination
     for vid, v in vehicles.items():
@@ -23,7 +70,7 @@ def step(sim_state):
                 sim_state.unload_vehicle(vid, to_unload)
                 boxes = sim_state.get_boxes()
     
-    # LOAD & MOVE: For idle vehicles
+    # LOAD, MOVE, AND TRANSHIP
     for vid, v in vehicles.items():
         if v["destination"] is None:
             loc = v["location"]
@@ -42,14 +89,41 @@ def step(sim_state):
                     sim_state.load_vehicle(vid, to_load)
                     boxes = sim_state.get_boxes()
             
-            # If has cargo, go to most common destination
             if v["cargo"]:
-                dest_counts = defaultdict(int)
-                for bid in v["cargo"]:
-                    dest = boxes[bid]["destination"]
-                    dest_counts[dest] += 1
-                most_common = max(dest_counts, key=dest_counts.get)
-                sim_state.move_vehicle(vid, most_common)
+                # Check if current vehicle can reach destination without terrain issues
+                # Get first box destination
+                first_bid = v["cargo"][0]
+                dest = boxes[first_bid]["destination"]
+                
+                # Check if truck would need to cross water
+                if vtype == VehicleType.SemiTruck and is_water_crossing(loc, dest):
+                    # Need to transload! Find nearest hub to switch to ship/plane
+                    nearest_hub = find_nearest_hub(loc, hubs)
+                    if nearest_hub and nearest_hub != loc:
+                        # Go to hub first
+                        sim_state.move_vehicle(vid, nearest_hub)
+                    else:
+                        # Try to create ship at nearest water point
+                        try:
+                            # Unload current cargo
+                            if v["cargo"]:
+                                sim_state.unload_vehicle(vid, v["cargo"])
+                            # Create ship at nearby water location
+                            ship_vid = sim_state.create_vehicle(VehicleType.CargoShip, loc)
+                            # Transfer cargo
+                            sim_state.load_vehicle(ship_vid, v["cargo"])
+                            sim_state.move_vehicle(ship_vid, dest)
+                        except ValueError:
+                            # Fallback to airplane
+                            try:
+                                plane_vid = sim_state.create_vehicle(VehicleType.Airplane, loc)
+                                sim_state.load_vehicle(plane_vid, v["cargo"])
+                                sim_state.move_vehicle(plane_vid, dest)
+                            except ValueError:
+                                sim_state.move_vehicle(vid, dest)
+                else:
+                    # Normal movement
+                    sim_state.move_vehicle(vid, dest)
             
             # If empty, go to nearest undelivered box
             elif not v["cargo"]:
@@ -64,73 +138,60 @@ def step(sim_state):
                 if nearest:
                     sim_state.move_vehicle(vid, nearest)
     
-    # SPAWN: Prioritize trains for cost efficiency
+    # SPAWN: Create appropriate vehicles based on route
     if tick == 0 or (len(vehicles) < 15 and tick % 50 == 0):
         undelivered = [bid for bid, box in boxes.items() if not box["delivered"] and box["vehicle_id"] is None]
         
         if undelivered:
-            # Group by origin
             origin_boxes = defaultdict(list)
             for bid in undelivered:
                 origin_boxes[boxes[bid]["location"]].append(bid)
             
-            # Calculate average distance for each origin
-            origin_distances = {}
             for origin, box_ids in origin_boxes.items():
-                total_dist = 0
-                for bid in box_ids:
-                    total_dist += haversine_distance_meters(origin, boxes[bid]["destination"])
-                origin_distances[origin] = total_dist / len(box_ids) if box_ids else 0
-            
-            # Sort origins by: more boxes AND longer distance (trains better for long haul)
-            sorted_origins = sorted(
-                origin_boxes.items(),
-                key=lambda x: (len(x[1]), origin_distances[x[0]]),
-                reverse=True
-            )
-            
-            for origin, box_ids in sorted_origins:
                 num_boxes = len(box_ids)
-                avg_dist = origin_distances[origin]
                 
-                # Train constraints:
-                # 1. Must spawn within 5km of hub
-                # 2. Best for: distance > 30km AND boxes >= 20
-                # 3. If distance is very short (<10km), use truck even if many boxes
+                # Check if route requires water crossing
+                needs_water_crossing = False
+                for bid in box_ids[:5]:  # Sample a few boxes
+                    if is_water_crossing(origin, boxes[bid]["destination"]):
+                        needs_water_crossing = True
+                        break
                 
-                use_train = False
-                use_ship = False
-                use_truck = False
+                # Choose vehicle based on route
+                if needs_water_crossing and num_boxes >= 10:
+                    # Try ship first (cheapest for water)
+                    try:
+                        vid = sim_state.create_vehicle(VehicleType.CargoShip, origin)
+                        to_load = box_ids[:VehicleType.CargoShip.value.capacity]
+                        sim_state.load_vehicle(vid, to_load)
+                        if to_load:
+                            dest = boxes[to_load[0]]["destination"]
+                            sim_state.move_vehicle(vid, dest)
+                        break
+                    except ValueError:
+                        # Try airplane
+                        try:
+                            vid = sim_state.create_vehicle(VehicleType.Airplane, origin)
+                            to_load = box_ids[:VehicleType.Airplane.value.capacity]
+                            sim_state.load_vehicle(vid, to_load)
+                            if to_load:
+                                dest = boxes[to_load[0]]["destination"]
+                                sim_state.move_vehicle(vid, dest)
+                            break
+                        except ValueError:
+                            pass
                 
-                # Check if location can spawn train (near hub)
-                # We don't know hub locations, so try train first, fallback if fails
-                
-                if avg_dist > 30000 and num_boxes >= 20:  # >30km and 20+ boxes
-                    use_train = True
-                elif avg_dist > 100000 and num_boxes >= 50:  # >100km long distance
-                    use_train = True
-                elif num_boxes > 200:  # Very large batch
-                    use_train = True
-                else:
-                    use_truck = True
-                
-                # Try train first (cheapest per km)
-                if use_train:
+                # Land route - use train for long distance, truck for short
+                if num_boxes >= 20:
                     try:
                         vid = sim_state.create_vehicle(VehicleType.Train, origin)
                         to_load = box_ids[:VehicleType.Train.value.capacity]
                         sim_state.load_vehicle(vid, to_load)
                         if to_load:
-                            # Go to most common destination
-                            dest_counts = defaultdict(int)
-                            for bid in to_load:
-                                dest = boxes[bid]["destination"]
-                                dest_counts[dest] += 1
-                            most_common = max(dest_counts, key=dest_counts.get)
-                            sim_state.move_vehicle(vid, most_common)
-                        break  # Spawn one per tick to control cost
+                            dest = boxes[to_load[0]]["destination"]
+                            sim_state.move_vehicle(vid, dest)
+                        break
                     except ValueError:
-                        # Train spawn failed (not near hub), fallback to truck
                         pass
                 
                 # Fallback to truck
@@ -139,12 +200,8 @@ def step(sim_state):
                     to_load = box_ids[:VehicleType.SemiTruck.value.capacity]
                     sim_state.load_vehicle(vid, to_load)
                     if to_load:
-                        dest_counts = defaultdict(int)
-                        for bid in to_load:
-                            dest = boxes[bid]["destination"]
-                            dest_counts[dest] += 1
-                        most_common = max(dest_counts, key=dest_counts.get)
-                        sim_state.move_vehicle(vid, most_common)
+                        dest = boxes[to_load[0]]["destination"]
+                        sim_state.move_vehicle(vid, dest)
                     break
                 except ValueError:
                     continue
