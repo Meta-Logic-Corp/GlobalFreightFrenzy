@@ -83,7 +83,7 @@ class Hub:
         self.destination_distances_km = {}
         self.destination_boxes = {}
         self.boxes = []
-        self.score = 0.0
+        self.score = float("-inf")
         self.score_details = {}
 
     def add_box(self, box):
@@ -122,33 +122,17 @@ def movement_cost_km(distance_km_value, vehicle_name):
 
 
 def spawn_plus_move_cost(start, end, vehicle_name, include_base_cost=True):
-    stats = VEHICLE_STATS[vehicle_name]
     cost = movement_cost_km(distance_km(start, end), vehicle_name)
     if include_base_cost:
-        cost += stats["base_cost"]
+        cost += VEHICLE_STATS[vehicle_name]["base_cost"]
     return cost
 
 
-def cargo_value_simple(box_count, distance_km_total):
-    return (35.0 * float(box_count)) + (0.12 * distance_km_total)
+def delivered_value_for_box_count(box_count):
+    return 120.0 * float(box_count)
 
 
-def goods_per_cost_score(goods_value, estimated_cost, epsilon=1e-9):
-    return goods_value / max(estimated_cost, epsilon)
-
-
-def aggregate_box_value(boxes, pickup_location=None):
-    total = 0.0
-    for box in boxes:
-        origin = pickup_location if pickup_location is not None else box["location"]
-        total += cargo_value_simple(
-            box_count=1,
-            distance_km_total=distance_km(origin, box["destination"]),
-        )
-    return total
-
-
-def estimate_event_penalty(vehicle_name, active_events, pickup_location=None, destination=None):
+def estimate_event_penalty(vehicle_name, active_events):
     mode = VEHICLE_STATS[vehicle_name]["mode"]
     penalty = 0.0
 
@@ -156,13 +140,13 @@ def estimate_event_penalty(vehicle_name, active_events, pickup_location=None, de
         event_type = event.get("type")
 
         if event_type == "ground_stop_flights" and mode == "air":
-            penalty += 1000000.0
+            penalty += 1_000_000.0
         elif event_type == "traffic" and mode == "land":
             speed_multiplier = event.get("speed_multiplier", 0.25)
             slowdown = max(0.0, 1.0 - speed_multiplier)
-            penalty += 1200.0 * slowdown
+            penalty += 1500.0 * slowdown
         elif event_type == "oceanic_weather" and mode == "ocean":
-            penalty += 1000000.0
+            penalty += 1_000_000.0
 
     return penalty
 
@@ -210,16 +194,14 @@ def is_land_route_allowed(start, end):
 
     return distance_km(start, end) <= _MAX_DIRECT_LAND_KM
 
+
 def is_ocean_route_allowed(start, end):
     edge = normalized_edge(start, end)
 
     if OCEAN_DIRECT_EDGES:
         return edge in OCEAN_DIRECT_EDGES
 
-    if start in OCEAN_PORTS and end in OCEAN_PORTS:
-        return True
-
-    return distance_km(start, end) <= 3000.0
+    return start in OCEAN_PORTS and end in OCEAN_PORTS
 
 
 def is_route_allowed(start, end, vehicle_name):
@@ -251,15 +233,6 @@ def route_distance_km(stops, start_location):
     return total
 
 
-def compute_route_legs(start_location, stops):
-    legs = []
-    current = start_location
-    for stop in stops:
-        legs.append((current, stop))
-        current = stop
-    return legs
-
-
 def route_is_fully_allowed(start_location, stops, vehicle_name):
     current = start_location
     for stop in stops:
@@ -269,13 +242,18 @@ def route_is_fully_allowed(start_location, stops, vehicle_name):
     return True
 
 
+def compute_center(points):
+    lat = sum(p[0] for p in points) / max(1, len(points))
+    lon = sum(p[1] for p in points) / max(1, len(points))
+    return (lat, lon)
+
+
 def cluster_destinations(destination_to_boxes):
     destinations = list(destination_to_boxes.keys())
     clusters = []
 
     for dest in destinations:
         placed = False
-
         for cluster in clusters:
             center = cluster["center"]
             if distance_km(dest, center) <= _CLUSTER_RADIUS_KM:
@@ -293,12 +271,6 @@ def cluster_destinations(destination_to_boxes):
             })
 
     return clusters
-
-
-def compute_center(points):
-    lat = sum(p[0] for p in points) / max(1, len(points))
-    lon = sum(p[1] for p in points) / max(1, len(points))
-    return (lat, lon)
 
 
 def choose_anchor_destination(hub_location, cluster_destinations_list):
@@ -343,14 +315,14 @@ def pick_cluster_boxes_for_vehicle(hub_location, cluster, vehicle_name):
     selected_destinations = sort_stops_from_hub(hub_location, list(set(selected_destinations)))
 
     selected_boxes = []
-    stop_box_ids = {}
-
-    for dest in selected_destinations:
-        stop_box_ids[dest] = []
+    stop_box_ids = {dest: [] for dest in selected_destinations}
 
     for dest in selected_destinations:
         boxes_for_dest = sorted(
-            [b for b in cluster["boxes"] if b["destination"] == dest and not b["delivered"] and b["vehicle_id"] is None],
+            [
+                b for b in cluster["boxes"]
+                if b["destination"] == dest and not b["delivered"] and b["vehicle_id"] is None
+            ],
             key=lambda b: distance_km(hub_location, b["destination"]),
         )
 
@@ -364,36 +336,7 @@ def pick_cluster_boxes_for_vehicle(hub_location, cluster, vehicle_name):
             break
 
     final_stops = [dest for dest in selected_destinations if stop_box_ids.get(dest)]
-
     return selected_boxes, [{"location": stop, "box_ids": stop_box_ids[stop]} for stop in final_stops]
-
-
-def estimate_route_scale_penalty(vehicle_name, total_available_boxes, route_distance_total_km):
-    trips_needed = math.ceil(total_available_boxes / max(1, VEHICLE_STATS[vehicle_name]["capacity"]))
-    penalty = (trips_needed - 1) * 120.0
-
-    if vehicle_name == "Drone":
-        penalty += (trips_needed - 1) * 1600.0
-        if total_available_boxes > 5:
-            penalty += 8000.0
-        if route_distance_total_km > 150.0:
-            penalty += 8000.0
-
-    if vehicle_name == "Airplane":
-        if total_available_boxes < 25:
-            penalty += 1800.0
-        if route_distance_total_km < 900.0:
-            penalty += 2500.0
-        if total_available_boxes < 10:
-            penalty += 5000.0
-
-    if vehicle_name == "Train" and total_available_boxes < 20:
-        penalty += 300.0
-
-    if vehicle_name == "CargoShip" and total_available_boxes < 40:
-        penalty += 800.0
-
-    return penalty
 
 
 def estimate_capacity_penalty(vehicle_name, box_count):
@@ -401,61 +344,152 @@ def estimate_capacity_penalty(vehicle_name, box_count):
     if box_count <= capacity:
         return 0.0
     overflow = box_count - capacity
-    return 10000.0 + (1000.0 * overflow)
+    return 10_000.0 + (1000.0 * overflow)
 
 
-def estimate_mode_preference_penalty(vehicle_name, pickup_location, stops, box_count, goods_value):
-    route_distance_total_km = route_distance_km(stops, pickup_location)
-
-    surface_candidates = []
-    for other_vehicle in ("SemiTruck", "Train", "CargoShip"):
-        if route_is_fully_allowed(pickup_location, stops, other_vehicle):
-            surface_candidates.append(other_vehicle)
-
-    penalty = 0.0
-    reasons = []
-
-    if vehicle_name == "Airplane":
-        if surface_candidates:
-            penalty += 4500.0
-            reasons.append(f"surface_available={surface_candidates}")
-
-        if box_count < 20:
-            penalty += 2500.0
-            reasons.append("low_box_count_for_plane")
-
-        if route_distance_total_km < 1200.0:
-            penalty += 2000.0
-            reasons.append("too_short_for_plane")
-
-        if goods_value < 1200.0:
-            penalty += 1800.0
-            reasons.append("goods_value_not_high_enough_for_plane")
+def estimate_scale_penalty(vehicle_name, total_available_boxes, route_distance_total_km):
+    capacity = VEHICLE_STATS[vehicle_name]["capacity"]
+    trips_needed = math.ceil(total_available_boxes / max(1, capacity))
+    penalty = (trips_needed - 1) * 150.0
 
     if vehicle_name == "Drone":
-        if surface_candidates:
-            penalty += 6000.0
-            reasons.append(f"surface_available={surface_candidates}")
+        penalty += (trips_needed - 1) * 2500.0
+        if total_available_boxes > 5:
+            penalty += 10_000.0
+        if route_distance_total_km > 120.0:
+            penalty += 9_000.0
 
-        if box_count >= 4:
-            penalty += 1200.0
-            reasons.append("drone_near_capacity")
+    if vehicle_name == "Airplane":
+        if total_available_boxes < 20:
+            penalty += 3_500.0
+        if route_distance_total_km < 1500.0:
+            penalty += 4_000.0
+        if total_available_boxes < 10:
+            penalty += 6_000.0
 
-        if box_count > 5:
-            penalty += 10000.0
-            reasons.append("drone_over_capacity_job")
+    if vehicle_name == "Train" and total_available_boxes < 15:
+        penalty += 400.0
 
-    if vehicle_name in ("SemiTruck", "Train"):
-        if route_distance_total_km > 300.0 and box_count >= 15:
-            penalty -= 120.0
-            reasons.append("surface_route_reward")
+    if vehicle_name == "CargoShip" and total_available_boxes < 30:
+        penalty += 1_000.0
+
+    return penalty
+
+
+def estimate_surface_bias_adjustment(vehicle_name, route_distance_total_km, box_count):
+    adjustment = 0.0
+    reasons = []
+
+    if vehicle_name == "SemiTruck":
+        if 10 <= box_count <= 50:
+            adjustment -= 120.0
+            reasons.append("truck_good_scale")
+        if route_distance_total_km <= 800.0:
+            adjustment -= 100.0
+            reasons.append("truck_good_distance")
+
+    if vehicle_name == "Train":
+        if box_count >= 20:
+            adjustment -= 180.0
+            reasons.append("train_bulk_reward")
+        if route_distance_total_km >= 300.0:
+            adjustment -= 120.0
+            reasons.append("train_medium_long_reward")
 
     if vehicle_name == "CargoShip":
-        if route_distance_total_km > 400.0 and box_count >= 30:
-            penalty -= 250.0
-            reasons.append("ocean_bulk_reward")
+        if box_count >= 40:
+            adjustment -= 250.0
+            reasons.append("ship_bulk_reward")
+        if route_distance_total_km >= 500.0:
+            adjustment -= 200.0
+            reasons.append("ship_long_ocean_reward")
 
-    return penalty, reasons, surface_candidates
+    return adjustment, reasons
+
+
+def airplane_hard_gate(vehicle_name, box_count, route_distance_total_km, cheaper_surface_candidates):
+    if vehicle_name not in ("Airplane", "Drone"):
+        return True, []
+
+    reasons = []
+
+    if vehicle_name == "Drone":
+        if box_count > 3:
+            reasons.append("drone_box_count_too_high")
+        if route_distance_total_km > 100.0:
+            reasons.append("drone_route_too_long")
+        if cheaper_surface_candidates:
+            reasons.append("surface_available_for_drone")
+        return len(reasons) == 0, reasons
+
+    if cheaper_surface_candidates and box_count < 35:
+        reasons.append("surface_available_and_box_count_not_high_enough")
+    if route_distance_total_km < 1800.0:
+        reasons.append("plane_route_too_short")
+    if box_count < 25:
+        reasons.append("plane_box_count_too_low")
+
+    return len(reasons) == 0, reasons
+
+
+def compute_candidate_costs(
+    vehicle_start,
+    pickup_location,
+    stops,
+    vehicle_name,
+    box_count,
+    total_available_boxes,
+    active_events,
+    include_base_cost=True,
+):
+    route_stops_only = [s["location"] for s in stops]
+    total_route_distance_km = route_distance_km(route_stops_only, pickup_location)
+
+    base_visit_cost = spawn_plus_move_cost(
+        vehicle_start,
+        pickup_location,
+        vehicle_name,
+        include_base_cost=include_base_cost,
+    )
+
+    delivery_cost = 0.0
+    current = pickup_location
+    for stop in stops:
+        delivery_cost += movement_cost_km(distance_km(current, stop["location"]), vehicle_name)
+        current = stop["location"]
+
+    handling_cost = float(box_count)
+    event_penalty = estimate_event_penalty(vehicle_name, active_events)
+    capacity_penalty = estimate_capacity_penalty(vehicle_name, box_count)
+    scale_penalty = estimate_scale_penalty(vehicle_name, total_available_boxes, total_route_distance_km)
+    surface_adjustment, surface_adjustment_reasons = estimate_surface_bias_adjustment(
+        vehicle_name,
+        total_route_distance_km,
+        box_count,
+    )
+
+    total_cost = (
+        base_visit_cost
+        + delivery_cost
+        + handling_cost
+        + event_penalty
+        + capacity_penalty
+        + scale_penalty
+        + surface_adjustment
+    )
+
+    return {
+        "base_visit_cost": base_visit_cost,
+        "delivery_cost": delivery_cost,
+        "handling_cost": handling_cost,
+        "event_penalty": event_penalty,
+        "capacity_penalty": capacity_penalty,
+        "scale_penalty": scale_penalty,
+        "surface_adjustment": surface_adjustment,
+        "surface_adjustment_reasons": surface_adjustment_reasons,
+        "total_cost": total_cost,
+        "total_route_distance_km": total_route_distance_km,
+    }
 
 
 def score_cluster_route_details(
@@ -469,7 +503,6 @@ def score_cluster_route_details(
     active_events = active_events or []
 
     selected_boxes, stops = pick_cluster_boxes_for_vehicle(pickup_location, cluster, vehicle_name)
-
     if not selected_boxes or not stops:
         return None
 
@@ -484,59 +517,45 @@ def score_cluster_route_details(
 
     box_count = len(selected_boxes)
     route_stops_only = [s["location"] for s in stops]
-    total_route_distance_km = route_distance_km(route_stops_only, pickup_location)
-    goods_value = aggregate_box_value(
-        selected_boxes,
-        pickup_location=pickup_location,
-    )
+    cheaper_surface_candidates = []
 
-    event_penalty = estimate_event_penalty(
-        vehicle_name,
-        active_events,
-        pickup_location=pickup_location,
-        destination=stops[-1]["location"],
-    )
+    for surface_vehicle in ("SemiTruck", "Train", "CargoShip"):
+        if surface_vehicle == vehicle_name:
+            continue
+        if route_is_fully_allowed(pickup_location, route_stops_only, surface_vehicle):
+            cheaper_surface_candidates.append(surface_vehicle)
 
-    capacity_penalty = estimate_capacity_penalty(vehicle_name, box_count)
-    scale_penalty = estimate_route_scale_penalty(
-        vehicle_name,
-        total_available_boxes=len(cluster["boxes"]),
-        route_distance_total_km=total_route_distance_km,
-    )
-
-    mode_penalty, mode_penalty_reasons, surface_candidates = estimate_mode_preference_penalty(
+    gate_ok, gate_reasons = airplane_hard_gate(
         vehicle_name=vehicle_name,
-        pickup_location=pickup_location,
-        stops=route_stops_only,
         box_count=box_count,
-        goods_value=goods_value,
+        route_distance_total_km=route_distance_km(route_stops_only, pickup_location),
+        cheaper_surface_candidates=cheaper_surface_candidates,
     )
+    if not gate_ok:
+        return {
+            "vehicle": vehicle_name,
+            "rejected": True,
+            "reject_reasons": gate_reasons,
+            "score": float("-inf"),
+        }
 
-    base_visit_cost = spawn_plus_move_cost(
-        vehicle_start,
-        pickup_location,
-        vehicle_name,
+    cost_details = compute_candidate_costs(
+        vehicle_start=vehicle_start,
+        pickup_location=pickup_location,
+        stops=stops,
+        vehicle_name=vehicle_name,
+        box_count=box_count,
+        total_available_boxes=len(cluster["boxes"]),
+        active_events=active_events,
         include_base_cost=include_base_cost,
     )
 
-    delivery_cost = 0.0
-    current = pickup_location
-    for stop in stops:
-        leg_distance = distance_km(current, stop["location"])
-        delivery_cost += movement_cost_km(leg_distance, vehicle_name)
-        current = stop["location"]
+    delivered_value = delivered_value_for_box_count(box_count)
+    total_cost = cost_details["total_cost"]
+    net_value = delivered_value - total_cost
+    cost_per_box = total_cost / max(1, box_count)
 
-    delivery_cost += float(box_count)
-
-    total_cost = (
-        base_visit_cost
-        + delivery_cost
-        + event_penalty
-        + capacity_penalty
-        + scale_penalty
-        + mode_penalty
-    )
-    score = goods_per_cost_score(goods_value, total_cost)
+    score = net_value - (4.0 * cost_per_box)
 
     return {
         "vehicle": vehicle_name,
@@ -546,32 +565,31 @@ def score_cluster_route_details(
         "stops": stops,
         "box_count": box_count,
         "box_ids": [box["id"] for box in selected_boxes],
-        "goods_value": goods_value,
-        "base_visit_cost": base_visit_cost,
-        "delivery_cost": delivery_cost,
-        "event_penalty": event_penalty,
-        "capacity_penalty": capacity_penalty,
-        "scale_penalty": scale_penalty,
-        "mode_penalty": mode_penalty,
-        "mode_penalty_reasons": mode_penalty_reasons,
-        "surface_candidates": surface_candidates,
-        "total_route_distance_km": total_route_distance_km,
-        "total_cost": total_cost,
+        "delivered_value": delivered_value,
+        "net_value": net_value,
+        "cost_per_box": cost_per_box,
+        "cheaper_surface_candidates": cheaper_surface_candidates,
+        "rejected": False,
+        "reject_reasons": [],
         "score": score,
+        **cost_details,
     }
 
 
 def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehicle_names=None):
     active_events = active_events or []
     clusters = cluster_destinations(hub.destination_boxes)
-    best = None
     start_location = hub.location if vehicle_start is None else vehicle_start
 
     vehicle_names = list(VEHICLE_STATS.keys())
     if allowed_vehicle_names is not None:
         vehicle_names = [v for v in vehicle_names if v in allowed_vehicle_names]
 
+    best = None
+
     for cluster in clusters:
+        candidates = []
+
         for vehicle_name in vehicle_names:
             details = score_cluster_route_details(
                 vehicle_start=start_location,
@@ -585,8 +603,25 @@ def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehi
             if details is None:
                 continue
 
-            if best is None or details["score"] > best["score"]:
-                best = details
+            if details.get("rejected"):
+                log(
+                    "CANDIDATE_REJECT",
+                    "hub=", hub.location,
+                    "vehicle=", vehicle_name,
+                    "reasons=", details.get("reject_reasons"),
+                )
+                continue
+
+            candidates.append(details)
+
+        if not candidates:
+            continue
+
+        candidates.sort(key=lambda d: (d["score"], -d["total_cost"]), reverse=True)
+        cluster_best = candidates[0]
+
+        if best is None or cluster_best["score"] > best["score"]:
+            best = cluster_best
 
     return best
 
@@ -597,7 +632,6 @@ def build_hubs(boxes):
     for box in boxes.values():
         if box["delivered"]:
             continue
-
         if box["vehicle_id"] is not None:
             continue
 
@@ -613,7 +647,7 @@ def refresh_hub_scores(hubs, active_events):
     for hub in hubs.values():
         best = best_route_for_hub(hub, active_events=active_events)
         if best is None:
-            hub.score = 0.0
+            hub.score = float("-inf")
             hub.score_details = {}
         else:
             hub.score = best["score"]
@@ -682,7 +716,7 @@ def claim_hub_for_vehicle(hub_location, vehicle_id):
 
 
 def try_create_best_vehicle(sim_state, hub, active_events):
-    best = best_route_for_hub(hub, active_events)
+    best = best_route_for_hub(hub, active_events=active_events)
     if best is None:
         log("CREATE_SKIP", "hub=", hub.location, "reason=no_best_route")
         return None
@@ -700,12 +734,12 @@ def try_create_best_vehicle(sim_state, hub, active_events):
             "vehicle=", vehicle_name,
             "hub=", hub.location,
             "score=", best["score"],
-            "boxes=", best["box_count"],
-            "stops=", [s["location"] for s in best["stops"]],
-            "route_km=", best.get("total_route_distance_km"),
-            "mode_penalty=", best.get("mode_penalty"),
-            "mode_penalty_reasons=", best.get("mode_penalty_reasons"),
-            "surface_candidates=", best.get("surface_candidates"),
+            "box_count=", best["box_count"],
+            "cost=", best["total_cost"],
+            "cost_per_box=", best["cost_per_box"],
+            "net_value=", best["net_value"],
+            "route_km=", best["total_route_distance_km"],
+            "surface_candidates=", best.get("cheaper_surface_candidates"),
         )
         return vehicle_id
     except ValueError as e:
@@ -757,10 +791,10 @@ def assign_plan_to_vehicle_from_current_location(sim_state, vehicle_id, vehicle,
         "from=", vehicle_location,
         "to_hub=", best_hub.location,
         "score=", best_overall["score"],
+        "cost=", best_overall["total_cost"],
+        "cost_per_box=", best_overall["cost_per_box"],
         "boxes=", best_overall["box_count"],
         "stops=", [s["location"] for s in best_overall["stops"]],
-        "mode_penalty=", best_overall.get("mode_penalty"),
-        "mode_penalty_reasons=", best_overall.get("mode_penalty_reasons"),
     )
 
     if not at_location(vehicle_location, best_hub.location):
@@ -801,11 +835,7 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
             for stop in stops:
                 all_box_ids.extend(stop["box_ids"])
 
-            available_box_ids = box_ids_still_available(
-                boxes,
-                all_box_ids,
-                location=pickup_location,
-            )
+            available_box_ids = box_ids_still_available(boxes, all_box_ids, location=pickup_location)
 
             log(
                 "AT_PICKUP",
@@ -820,7 +850,7 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
                     sim_state.load_vehicle(vehicle_id, available_box_ids)
                     log("LOAD_OK", "vehicle_id=", vehicle_id, "box_ids=", available_box_ids)
                 except ValueError as e:
-                    reduced = available_box_ids[: max(1, min(len(available_box_ids), VEHICLE_STATS[vehicle_name]["capacity"]))]
+                    reduced = available_box_ids[:max(1, min(len(available_box_ids), VEHICLE_STATS[vehicle_name]["capacity"]))]
                     log("LOAD_FAIL", "vehicle_id=", vehicle_id, "error=", e, "retry_box_ids=", reduced)
                     try:
                         sim_state.load_vehicle(vehicle_id, reduced)
@@ -945,7 +975,6 @@ def process_vehicle_plan(sim_state, vehicle_id, vehicle, boxes):
 
     if plan["phase"] == "idle":
         log("PLAN_IDLE", "vehicle_id=", vehicle_id, "location=", current_location)
-        return
 
 
 def step(sim_state):
@@ -980,10 +1009,9 @@ def step(sim_state):
             "score=", hub.score,
             "best_vehicle=", hub.score_details.get("vehicle"),
             "best_boxes=", hub.score_details.get("box_count"),
+            "best_cost=", hub.score_details.get("total_cost"),
+            "best_cost_per_box=", hub.score_details.get("cost_per_box"),
             "best_stops=", [s["location"] for s in hub.score_details.get("stops", [])],
-            "mode_penalty=", hub.score_details.get("mode_penalty"),
-            "mode_penalty_reasons=", hub.score_details.get("mode_penalty_reasons"),
-            "surface_candidates=", hub.score_details.get("surface_candidates"),
         )
 
     for vehicle_id, vehicle in vehicles.items():
