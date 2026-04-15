@@ -118,15 +118,20 @@ def step(sim_state):
                     if distance_m(loc, nearest) > 1000:
                         sim_state.move_vehicle(vid, nearest)
                     else:
-                        # At hub, unload and create ship/plane
-                        cargo_copy = list(v["cargo"])  # SAVE CARGO BEFORE UNLOADING
-                        sim_state.unload_vehicle(vid, v["cargo"])
+                        # SAVE CARGO BEFORE ANYTHING ELSE
+                        cargo_to_transfer = list(v["cargo"])  # Make a copy
+                        target_dest = target  # Save destination
+                        
+                        # Unload from current vehicle
+                        sim_state.unload_vehicle(vid, cargo_to_transfer)
                         boxes = sim_state.get_boxes()
+                        
+                        # Create new vehicle and load the saved cargo
                         for new_type in [VehicleType.CargoShip, VehicleType.Airplane]:
                             try:
                                 new_vid = sim_state.create_vehicle(new_type, loc)
-                                sim_state.load_vehicle(new_vid, cargo_copy)  # USE SAVED CARGO
-                                sim_state.move_vehicle(new_vid, target)
+                                sim_state.load_vehicle(new_vid, cargo_to_transfer)
+                                sim_state.move_vehicle(new_vid, target_dest)
                                 break
                             except ValueError:
                                 continue
@@ -135,15 +140,20 @@ def step(sim_state):
             
             elif vtype in [VehicleType.CargoShip, VehicleType.Airplane]:
                 if not is_overseas(loc, target):
-                    # Reached land, switch to land vehicle
-                    cargo_copy = list(v["cargo"])  # SAVE CARGO BEFORE UNLOADING
-                    sim_state.unload_vehicle(vid, v["cargo"])
+                    # SAVE CARGO BEFORE ANYTHING ELSE
+                    cargo_to_transfer = list(v["cargo"])  # Make a copy
+                    target_dest = target  # Save destination
+                    
+                    # Unload from current vehicle
+                    sim_state.unload_vehicle(vid, cargo_to_transfer)
                     boxes = sim_state.get_boxes()
+                    
+                    # Create land vehicle and load the saved cargo
                     for new_type in [VehicleType.Train, VehicleType.SemiTruck]:
                         try:
                             new_vid = sim_state.create_vehicle(new_type, loc)
-                            sim_state.load_vehicle(new_vid, cargo_copy)  # USE SAVED CARGO
-                            sim_state.move_vehicle(new_vid, target)
+                            sim_state.load_vehicle(new_vid, cargo_to_transfer)
+                            sim_state.move_vehicle(new_vid, target_dest)
                             break
                         except ValueError:
                             continue
