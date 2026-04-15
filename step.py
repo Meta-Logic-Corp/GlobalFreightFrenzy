@@ -1,4 +1,4 @@
-import VehicleType, haversine_distance_meters
+from simulator import VehicleType, haversine_distance_meters
 from collections import defaultdict
 import math
 
