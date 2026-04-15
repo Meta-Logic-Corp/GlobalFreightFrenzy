@@ -1,58 +1,87 @@
-from simulator import VehicleType, haversine_distance_meters
+simulator import VehicleType, haversine_distance_meters
 from collections import defaultdict
 import math
 
 _PROXIMITY_M = 50.0
 
-# Define hub/port/airport locations (discovered from boxes)
-WATER_COORDINATES = [
-    # Major crossing points (you can discover these dynamically)
-    (40.7128, -74.0060),   # NYC - Atlantic hub
-    (33.9425, -118.4081),  # LA - Pacific hub
-    (51.5074, -0.1278),    # London
-]
+# Vehicle capabilities and restrictions
+VEHICLE_RESTRICTIONS = {
+    VehicleType.SemiTruck: {
+        "terrain": "land",
+        "spawn": "hub",
+        "load_unload": "hub",
+        "max_distance": None
+    },
+    VehicleType.Train: {
+        "terrain": "land", 
+        "spawn": "hub",
+        "load_unload": "hub",
+        "max_distance": None
+    },
+    VehicleType.Airplane: {
+        "terrain": "any",
+        "spawn": "airport",
+        "load_unload": "airport",
+        "max_distance": None
+    },
+    VehicleType.CargoShip: {
+        "terrain": "water",
+        "spawn": "ocean_port",
+        "load_unload": "ocean_port",
+        "max_distance": None
+    },
+    VehicleType.Drone: {
+        "terrain": "any",
+        "spawn": "airport",
+        "load_unload": "airport",
+        "max_distance": 20000  # 20km range
+    }
+}
 
 def is_water_crossing(from_loc, to_loc):
-    """Detect if path likely crosses ocean (simplified)"""
-    # Check if distance is very long (>1000km) and crosses major bodies of water
+    """Detect if path requires water crossing"""
     dist = haversine_distance_meters(from_loc, to_loc)
-    
     # Long distance over 500km likely needs water crossing or air
-    if dist > 500000:  # 500km
+    if dist > 500000:
         return True
     
-    # Check lat/lon ranges that indicate ocean crossings
     from_lat, from_lon = from_loc
     to_lat, to_lon = to_loc
     
-    # Crossing Atlantic (East-West between Americas and Europe)
+    # Atlantic crossing
     if (from_lon < -60 and to_lon > -10) or (from_lon > -10 and to_lon < -60):
-        if abs(from_lat - to_lat) < 50:  # Similar latitude
+        if abs(from_lat - to_lat) < 50:
             return True
     
-    # Crossing Pacific
+    # Pacific crossing  
     if (from_lon < -120 and to_lon > 120) or (from_lon > 120 and to_lon < -120):
         return True
     
     return False
 
-def find_nearest_hub(location, hubs):
-    """Find nearest hub/port/airport to location"""
-    nearest = None
-    min_dist = float('inf')
-    for hub in hubs:
-        dist = haversine_distance_meters(location, hub)
-        if dist < min_dist:
-            min_dist = dist
-            nearest = hub
-    return nearest
+def can_vehicle_handle_route(vtype, from_loc, to_loc, num_boxes, sim_state):
+    """Check if vehicle can handle this route given restrictions"""
+    restrictions = VEHICLE_RESTRICTIONS[vtype]
+    
+    # Check distance limit
+    if restrictions["max_distance"]:
+        dist = haversine_distance_meters(from_loc, to_loc)
+        if dist > restrictions["max_distance"]:
+            return False
+    
+    # Check capacity
+    if num_boxes > vtype.value.capacity:
+        return False
+    
+    # Terrain will be checked by simulator via ValueError
+    return True
 
 def step(sim_state):
     tick = sim_state.tick
     vehicles = sim_state.get_vehicles()
     boxes = sim_state.get_boxes()
     
-    # Discover hubs from all box locations
+    # Discover hubs from box locations
     all_locations = set()
     for box in boxes.values():
         all_locations.add(box["location"])
@@ -70,7 +99,7 @@ def step(sim_state):
                 sim_state.unload_vehicle(vid, to_unload)
                 boxes = sim_state.get_boxes()
     
-    # LOAD, MOVE, AND TRANSHIP
+    # MANAGE VEHICLES: Load, move, transload
     for vid, v in vehicles.items():
         if v["destination"] is None:
             loc = v["location"]
@@ -90,40 +119,61 @@ def step(sim_state):
                     boxes = sim_state.get_boxes()
             
             if v["cargo"]:
-                # Check if current vehicle can reach destination without terrain issues
-                # Get first box destination
+                # Get destination for cargo
                 first_bid = v["cargo"][0]
                 dest = boxes[first_bid]["destination"]
+                num_boxes = len(v["cargo"])
                 
-                # Check if truck would need to cross water
-                if vtype == VehicleType.SemiTruck and is_water_crossing(loc, dest):
-                    # Need to transload! Find nearest hub to switch to ship/plane
-                    nearest_hub = find_nearest_hub(loc, hubs)
-                    if nearest_hub and nearest_hub != loc:
-                        # Go to hub first
-                        sim_state.move_vehicle(vid, nearest_hub)
-                    else:
-                        # Try to create ship at nearest water point
-                        try:
-                            # Unload current cargo
-                            if v["cargo"]:
-                                sim_state.unload_vehicle(vid, v["cargo"])
-                            # Create ship at nearby water location
-                            ship_vid = sim_state.create_vehicle(VehicleType.CargoShip, loc)
-                            # Transfer cargo
-                            sim_state.load_vehicle(ship_vid, v["cargo"])
-                            sim_state.move_vehicle(ship_vid, dest)
-                        except ValueError:
-                            # Fallback to airplane
-                            try:
-                                plane_vid = sim_state.create_vehicle(VehicleType.Airplane, loc)
-                                sim_state.load_vehicle(plane_vid, v["cargo"])
-                                sim_state.move_vehicle(plane_vid, dest)
-                            except ValueError:
-                                sim_state.move_vehicle(vid, dest)
-                else:
-                    # Normal movement
+                # Check if current vehicle can handle the route
+                if can_vehicle_handle_route(vtype, loc, dest, num_boxes, sim_state):
+                    # No terrain violation - go direct
                     sim_state.move_vehicle(vid, dest)
+                else:
+                    # Need to transload at nearest hub
+                    nearest_hub = None
+                    min_dist = float('inf')
+                    for hub in hubs:
+                        if hub != loc:
+                            dist = haversine_distance_meters(loc, hub)
+                            if dist < min_dist:
+                                min_dist = dist
+                                nearest_hub = hub
+                    
+                    if nearest_hub:
+                        # Unload current cargo first
+                        if v["cargo"]:
+                            sim_state.unload_vehicle(vid, v["cargo"])
+                            boxes = sim_state.get_boxes()
+                        
+                        # Try to create appropriate vehicle at hub
+                        if is_water_crossing(loc, dest):
+                            # Try ship first
+                            try:
+                                new_vid = sim_state.create_vehicle(VehicleType.CargoShip, nearest_hub)
+                                sim_state.load_vehicle(new_vid, v["cargo"])
+                                sim_state.move_vehicle(new_vid, dest)
+                            except ValueError:
+                                # Try plane
+                                try:
+                                    new_vid = sim_state.create_vehicle(VehicleType.Airplane, nearest_hub)
+                                    sim_state.load_vehicle(new_vid, v["cargo"])
+                                    sim_state.move_vehicle(new_vid, dest)
+                                except ValueError:
+                                    # Send original truck
+                                    sim_state.move_vehicle(vid, dest)
+                        else:
+                            # Try train for long land route
+                            if num_boxes >= 20:
+                                try:
+                                    new_vid = sim_state.create_vehicle(VehicleType.Train, nearest_hub)
+                                    sim_state.load_vehicle(new_vid, v["cargo"])
+                                    sim_state.move_vehicle(new_vid, dest)
+                                except ValueError:
+                                    sim_state.move_vehicle(vid, dest)
+                            else:
+                                sim_state.move_vehicle(vid, dest)
+                    else:
+                        sim_state.move_vehicle(vid, dest)
             
             # If empty, go to nearest undelivered box
             elif not v["cargo"]:
@@ -138,7 +188,7 @@ def step(sim_state):
                 if nearest:
                     sim_state.move_vehicle(vid, nearest)
     
-    # SPAWN: Create appropriate vehicles based on route
+    # SPAWN: Create vehicles respecting cargo constraints
     if tick == 0 or (len(vehicles) < 15 and tick % 50 == 0):
         undelivered = [bid for bid, box in boxes.items() if not box["delivered"] and box["vehicle_id"] is None]
         
@@ -151,28 +201,32 @@ def step(sim_state):
                 num_boxes = len(box_ids)
                 
                 # Check if route requires water crossing
-                needs_water_crossing = False
-                for bid in box_ids[:5]:  # Sample a few boxes
+                needs_water = False
+                for bid in box_ids[:5]:
                     if is_water_crossing(origin, boxes[bid]["destination"]):
-                        needs_water_crossing = True
+                        needs_water = True
                         break
                 
-                # Choose vehicle based on route
-                if needs_water_crossing and num_boxes >= 10:
-                    # Try ship first (cheapest for water)
-                    try:
-                        vid = sim_state.create_vehicle(VehicleType.CargoShip, origin)
-                        to_load = box_ids[:VehicleType.CargoShip.value.capacity]
-                        sim_state.load_vehicle(vid, to_load)
-                        if to_load:
-                            dest = boxes[to_load[0]]["destination"]
-                            sim_state.move_vehicle(vid, dest)
-                        break
-                    except ValueError:
-                        # Try airplane
+                # Choose vehicle based on route and cargo size
+                if needs_water:
+                    # For water crossings, use ship or plane
+                    if num_boxes >= 10 and num_boxes <= 1000:
+                        try:
+                            vid = sim_state.create_vehicle(VehicleType.CargoShip, origin)
+                            to_load = box_ids[:1000]
+                            sim_state.load_vehicle(vid, to_load)
+                            if to_load:
+                                dest = boxes[to_load[0]]["destination"]
+                                sim_state.move_vehicle(vid, dest)
+                            break
+                        except ValueError:
+                            pass
+                    
+                    # Try airplane for smaller loads or if ship fails
+                    if num_boxes <= 100:
                         try:
                             vid = sim_state.create_vehicle(VehicleType.Airplane, origin)
-                            to_load = box_ids[:VehicleType.Airplane.value.capacity]
+                            to_load = box_ids[:100]
                             sim_state.load_vehicle(vid, to_load)
                             if to_load:
                                 dest = boxes[to_load[0]]["destination"]
@@ -181,11 +235,11 @@ def step(sim_state):
                         except ValueError:
                             pass
                 
-                # Land route - use train for long distance, truck for short
-                if num_boxes >= 20:
+                # Land route - use train for bulk/long distance
+                if num_boxes >= 20 and num_boxes <= 500:
                     try:
                         vid = sim_state.create_vehicle(VehicleType.Train, origin)
-                        to_load = box_ids[:VehicleType.Train.value.capacity]
+                        to_load = box_ids[:500]
                         sim_state.load_vehicle(vid, to_load)
                         if to_load:
                             dest = boxes[to_load[0]]["destination"]
@@ -194,14 +248,15 @@ def step(sim_state):
                     except ValueError:
                         pass
                 
-                # Fallback to truck
-                try:
-                    vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
-                    to_load = box_ids[:VehicleType.SemiTruck.value.capacity]
-                    sim_state.load_vehicle(vid, to_load)
-                    if to_load:
-                        dest = boxes[to_load[0]]["destination"]
-                        sim_state.move_vehicle(vid, dest)
-                    break
-                except ValueError:
-                    continue
+                # Small loads or fallback - use truck
+                if num_boxes <= 50:
+                    try:
+                        vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
+                        to_load = box_ids[:50]
+                        sim_state.load_vehicle(vid, to_load)
+                        if to_load:
+                            dest = boxes[to_load[0]]["destination"]
+                            sim_state.move_vehicle(vid, dest)
+                        break
+                    except ValueError:
+                        continue
