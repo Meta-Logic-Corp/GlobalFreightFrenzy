@@ -1,6 +1,7 @@
 from simulator import VehicleType
 from collections import deque
 import math
+import random
 
 def distance(coord1, coord2):
     """Simple Euclidean distance"""
@@ -18,41 +19,43 @@ def plan_route(box, hubs):
         path = queue.popleft()
         loc = path[-1]
         
-        # Reached destination?
-        if distance(loc, dest) < 0.0005:  # ~50 meters
+        if distance(loc, dest) < 0.0005:
             return path + [dest]
         
-        # Try all hubs
         for hub in hubs:
             if hub not in visited:
                 visited.add(hub)
                 queue.append(path + [hub])
     
-    return [origin, dest]  # fallback
+    return [origin, dest]
 
 def step(sim_state):
-    # Get hubs (in real scenario, parse from bootstrap)
-    hubs = [(33.9425, -118.4081), (40.6413, -73.7781)]
-    
     if sim_state.tick == 0:
         boxes = sim_state.get_boxes()
         
+        # Discover hubs from box locations
+        hubs = set()
+        for box in boxes.values():
+            hubs.add(box["location"])
+            hubs.add(box["destination"])
+        hubs = list(hubs)
+        
         for box in boxes.values():
             if not box["delivered"]:
-                # Plan route through hubs
                 route = plan_route(box, hubs)
                 
-                # Use cheapest vehicle (CargoShip for long, Truck for short)
-                dist = distance(route[0], route[-1])
-                if dist > 0.5:  # >50km
-                    vtype = VehicleType.CargoShip
-                else:
-                    vtype = VehicleType.SemiTruck
+                # Try different vehicle types until one works
+                vehicle_types = list(VehicleType)
+                random.shuffle(vehicle_types)
                 
-                # Deploy
-                vid = sim_state.create_vehicle(vtype, route[0])
-                sim_state.load_vehicle(vid, [box["id"]])
-                sim_state.move_vehicle(vid, route[1])
+                for vtype in vehicle_types:
+                    try:
+                        vid = sim_state.create_vehicle(vtype, route[0])
+                        sim_state.load_vehicle(vid, [box["id"]])
+                        sim_state.move_vehicle(vid, route[1])
+                        break  # Success, exit loop
+                    except ValueError:
+                        continue  # Try next vehicle type
     
     # Unload at destination
     vehicles = sim_state.get_vehicles()
