@@ -50,14 +50,16 @@ def best_vehicle(num_boxes, distance_m, is_overseas_route):
     """Choose cheapest vehicle for the job"""
     if is_overseas_route:
         # Overseas: ship cheapest, plane faster but expensive
-        if num_boxes >= 10:
+        if num_boxes > 100:
             return VehicleType.CargoShip
-        return VehicleType.Airplane
+        else:  
+            return VehicleType.Airplane
     
     # Land route
-    if num_boxes >= 20 and distance_m > 50000:
+    if num_boxes > 50 and distance_m > 50000:
         return VehicleType.Train
-    return VehicleType.SemiTruck
+    else: 
+        return VehicleType.SemiTruck
 
 def step(sim_state):
     tick = sim_state.tick
