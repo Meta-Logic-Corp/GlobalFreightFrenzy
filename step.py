@@ -1,6 +1,3 @@
-from simulator import VehicleType, haversine_distance_meters
-from collections import defaultdict
-
 _PROXIMITY_M = 50.0
 _LOAD_UNLOAD_FACILITY_RANGE_M = 5000.0
 
@@ -222,4 +219,32 @@ def step(sim_state):
                 hub = get_nearest_location(origin, hubs)
                 if hub:
                     try:
-                        vid = sim_state.create_vehicle
+                        vid = sim_state.create_vehicle(VehicleType.Train, hub)
+                        sim_state.load_vehicle(vid, box_ids[:500])
+                        sim_state.move_vehicle(vid, sample_dest)
+                        spawned = True
+                    except ValueError:
+                        pass
+
+            # 3. Default - SemiTruck
+            if not spawned and n_boxes <= 50 and hubs:
+                hub = get_nearest_location(origin, hubs)
+                if hub:
+                    try:
+                        vid = sim_state.create_vehicle(VehicleType.SemiTruck, hub)
+                        sim_state.load_vehicle(vid, box_ids[:50])
+                        sim_state.move_vehicle(vid, sample_dest)
+                        spawned = True
+                    except ValueError:
+                        pass
+
+            # 4. Drone for very small/short range (optional optimization)
+            if not spawned and n_boxes <= 5:
+                airport = get_nearest_location(origin, airports)
+                if airport and haversine_distance_meters(origin, sample_dest) <= 18000:
+                    try:
+                        vid = sim_state.create_vehicle(VehicleType.Drone, airport)
+                        sim_state.load_vehicle(vid, box_ids[:5])
+                        sim_state.move_vehicle(vid, sample_dest)
+                    except ValueError:
+                        pass
