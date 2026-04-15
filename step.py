@@ -1,14 +1,11 @@
 from simulator import VehicleType
 from collections import deque
 import math
-import random
 
 def distance(coord1, coord2):
-    """Simple Euclidean distance"""
     return math.sqrt((coord1[0]-coord2[0])**2 + (coord1[1]-coord2[1])**2)
 
 def plan_route(box, hubs):
-    """BFS to find shortest path through hubs"""
     origin = box["location"]
     dest = box["destination"]
     
@@ -44,18 +41,13 @@ def step(sim_state):
             if not box["delivered"]:
                 route = plan_route(box, hubs)
                 
-                # Try different vehicle types until one works
-                vehicle_types = list(VehicleType)
-                random.shuffle(vehicle_types)
-                
-                for vtype in vehicle_types:
-                    try:
-                        vid = sim_state.create_vehicle(vtype, route[0])
-                        sim_state.load_vehicle(vid, [box["id"]])
-                        sim_state.move_vehicle(vid, route[1])
-                        break  # Success, exit loop
-                    except ValueError:
-                        continue  # Try next vehicle type
+                # Only use SemiTruck (can unload anywhere)
+                try:
+                    vid = sim_state.create_vehicle(VehicleType.SemiTruck, route[0])
+                    sim_state.load_vehicle(vid, [box["id"]])
+                    sim_state.move_vehicle(vid, route[1])
+                except ValueError:
+                    pass  # Skip if can't spawn
     
     # Unload at destination
     vehicles = sim_state.get_vehicles()
@@ -63,7 +55,7 @@ def step(sim_state):
     
     for vid, v in vehicles.items():
         if v["destination"] is None and v["cargo"]:
-            unload = [bid for bid in v["cargo"] 
-                     if distance(boxes[bid]["destination"], v["location"]) < 0.0005]
-            if unload:
-                sim_state.unload_vehicle(vid, unload)
+            to_unload = [bid for bid in v["cargo"] 
+                        if distance(boxes[bid]["destination"], v["location"]) < 0.0005]
+            if to_unload:
+                sim_state.unload_vehicle(vid, to_unload)  # SemiTruck works at hubs
