@@ -1,639 +1,239 @@
+
 from simulator import VehicleType, haversine_distance_meters
-import math
 
-_PROXIMITY_M = 50.0
-_CLUSTER_RADIUS_KM = 150.0
-_ENROUTE_CORRIDOR_KM = 80.0
-_ENROUTE_PROGRESS_MIN = 0.15
-_MAX_DIRECT_LAND_KM = 1400.0
-_MAX_DIRECT_DRONE_KM = 250.0
-_MIN_SHIP_ROUTE_KM = 600.0
+AIRPORTS = [
+    {'id': 'los_angeles_international_airport',         'lat':  33.9425, 'lon': -118.4081},
+    {'id': 'john_f_kennedy_international_airport',      'lat':  40.6413, 'lon':  -73.7781},
+    {'id': 'ohare_international_airport',               'lat':  41.9742, 'lon':  -87.9073},
+    {'id': 'dallas_fort_worth_international_airport',   'lat':  32.8998, 'lon':  -97.0403},
+    {'id': 'miami_international_airport',               'lat':  25.7959, 'lon':  -80.2870},
+    {'id': 'seattle_tacoma_international_airport',      'lat':  47.4502, 'lon': -122.3088},
+    {'id': 'heathrow_airport',                          'lat':  51.4700, 'lon':   -0.4543},
+    {'id': 'frankfurt_airport',                         'lat':  50.0379, 'lon':    8.5622},
+    {'id': 'dubai_international_airport',               'lat':  25.2532, 'lon':   55.3657},
+    {'id': 'chhatrapati_shivaji_maharaj_international', 'lat':  19.0896, 'lon':   72.8656},
+    {'id': 'singapore_changi_airport',                  'lat':   1.3644, 'lon':  103.9915},
+    {'id': 'haneda_airport',                            'lat':  35.5494, 'lon':  139.7798},
+    {'id': 'sydney_kingsford_smith_airport',            'lat': -33.9461, 'lon':  151.1772},
+    {'id': 'guarulhos_international_airport',           'lat': -23.4356, 'lon':  -46.4731},
+    {'id': 'or_tambo_international_airport',            'lat': -26.1367, 'lon':   28.2411},
+    {'id': 'jomo_kenyatta_international_airport',       'lat':  -1.3192, 'lon':   36.9275},
+    {'id': 'mexico_city_international_airport',         'lat':  19.4361, 'lon':  -99.0719},
+    {'id': 'toronto_pearson_international_airport',     'lat':  43.6777, 'lon':  -79.6248},
+]
 
-DEBUG = True
+OCEAN_PORTS = [
+    {'id': 'port_of_los_angeles',     'lat':  33.7361, 'lon': -118.2639},
+    {'id': 'port_of_new_york_and_nj', 'lat':  40.6681, 'lon':  -74.0455},
+    {'id': 'port_of_chicago',         'lat':  41.8800, 'lon':  -87.6200},
+    {'id': 'portmiami',               'lat':  25.7781, 'lon':  -80.1794},
+    {'id': 'port_of_seattle',         'lat':  47.6026, 'lon': -122.3382},
+    {'id': 'port_of_london',          'lat':  51.5074, 'lon':   -0.0174},
+    {'id': 'port_of_hamburg',         'lat':  53.5461, 'lon':    9.9661},
+    {'id': 'jebel_ali_port',          'lat':  25.0108, 'lon':   55.0617},
+    {'id': 'jawaharlal_nehru_port',   'lat':  18.9498, 'lon':   72.9483},
+    {'id': 'port_of_singapore',       'lat':   1.2644, 'lon':  103.8200},
+    {'id': 'port_of_tokyo',           'lat':  35.6296, 'lon':  139.7773},
+    {'id': 'port_botany',             'lat': -33.9656, 'lon':  151.2010},
+    {'id': 'port_of_santos',          'lat': -23.9608, 'lon':  -46.3288},
+    {'id': 'port_of_durban',          'lat': -29.8713, 'lon':   31.0262},
+    {'id': 'port_of_mombasa',         'lat':  -4.0435, 'lon':   39.6682},
+    {'id': 'port_of_toronto',         'lat':  43.6407, 'lon':  -79.3590},
+    {'id': 'port_of_veracruz',        'lat':  19.2010, 'lon':  -96.1342},
+]
 
-VEHICLE_ENUM = {
-    "SemiTruck": VehicleType.SemiTruck,
-    "Train": VehicleType.Train,
-    "Airplane": VehicleType.Airplane,
-    "CargoShip": VehicleType.CargoShip,
-    "Drone": VehicleType.Drone,
-}
+SHIPPING_HUBS = [
+    {'id': 'los_angeles_distribution_center', 'lat':  33.9425, 'lon': -118.4081},
+    {'id': 'new_york_distribution_center',    'lat':  40.6413, 'lon':  -73.7781},
+    {'id': 'chicago_distribution_center',     'lat':  41.9742, 'lon':  -87.9073},
+    {'id': 'dallas_distribution_center',      'lat':  32.8481, 'lon':  -97.0403},
+    {'id': 'miami_distribution_center',       'lat':  25.7959, 'lon':  -80.2870},
+    {'id': 'seattle_distribution_center',     'lat':  47.4502, 'lon': -122.3088},
+    {'id': 'london_hub',                      'lat':  51.5074, 'lon':   -0.1278},
+    {'id': 'frankfurt_distribution_center',   'lat':  50.1109, 'lon':    8.6821},
+    {'id': 'dubai_hub',                       'lat':  25.2048, 'lon':   55.2708},
+    {'id': 'mumbai_distribution_center',      'lat':  19.0760, 'lon':   72.8777},
+    {'id': 'singapore_hub',                   'lat':   1.3521, 'lon':  103.8198},
+    {'id': 'tokyo_distribution_center',       'lat':  35.6762, 'lon':  139.6503},
+    {'id': 'sydney_hub',                      'lat': -33.8688, 'lon':  151.2093},
+    {'id': 'sao_paulo_distribution_center',   'lat': -23.5505, 'lon':  -46.6333},
+    {'id': 'johannesburg_hub',                'lat': -26.2041, 'lon':   28.0473},
+    {'id': 'nairobi_distribution_center',     'lat':  -1.2921, 'lon':   36.8219},
+    {'id': 'mexico_city_hub',                 'lat':  19.4326, 'lon':  -99.1332},
+    {'id': 'toronto_hub',                     'lat':  43.6532, 'lon':  -79.3832},
+]
 
-VEHICLE_STATS = {
-    "SemiTruck": {
-        "base_cost": 100.0,
-        "per_km_cost": 0.05,
-        "speed_kmh": 80.0,
-        "capacity": 50,
-        "mode": "land",
-    },
-    "Train": {
-        "base_cost": 500.0,
-        "per_km_cost": 0.02,
-        "speed_kmh": 120.0,
-        "capacity": 500,
-        "mode": "land",
-    },
-    "Airplane": {
-        "base_cost": 2000.0,
-        "per_km_cost": 0.50,
-        "speed_kmh": 800.0,
-        "capacity": 100,
-        "mode": "air",
-    },
-    "CargoShip": {
-        "base_cost": 1000.0,
-        "per_km_cost": 0.01,
-        "speed_kmh": 30.0,
-        "capacity": 1000,
-        "mode": "ocean",
-    },
-    "Drone": {
-        "base_cost": 50.0,
-        "per_km_cost": 0.30,
-        "speed_kmh": 50.0,
-        "capacity": 5,
-        "mode": "air",
-    },
-}
+# Proximity thresholds (metres)
+LOAD_R          = 50.0
+ARRIVE_R        = 100.0
+INFRA_R         = 5_000.0
 
-LAND_DIRECT_EDGES = set()
-OCEAN_DIRECT_EDGES = set()
+# How often to run the dispatch pass, and vehicle selection thresholds
+ASSIGN_INTERVAL = 10
+TRAIN_MIN_BOXES = 30
+SHIP_MIN_BOXES  = 20
 
-DISPATCH_STATE = {
-    "vehicle_plans": {},
-    "hub_vehicles": {},
-    "last_undelivered_count": None,
-    "stalled_ticks": 0,
-}
+# Canal waypoints for ships (Rarely Used)
+PANAMA      = (8.99,    -79.57)
+SUEZ        = (30.58,    32.26)
 
+# Land waypoints to keep trucks off water
+FLORIDA_GW  = (30.33,   -81.65)   # Jacksonville - Florida peninsula
+UPPER_CHINA = (43.8627,  118.754) # Inner Mongolia - Singapore <-> Tokyo
+CENT_AFRICA = (4.371,    33.366)  # South Sudan - Johannesburg <-> north
+EGYPT_GW    = (29.06,    40.00)   # Cairo - Nairobi <-> Dubai/Mumbai
+SAO_GW1     = (15.861,  -87.80)  # Guatemala - Central American land bridge
+SAO_GW2     = (30.50,  -113.50)   # SE New Mexico - Sao Paulo <-> North America
 
-def log(*args):
-    if DEBUG:
-        print(*args)
-
-
-class Hub:
-    def __init__(self, location):
-        self.location = location
-        self.cargo_count = 0
-        self.destination_counts = {}
-        self.destination_distances_km = {}
-        self.destination_boxes = {}
-        self.boxes = []
-        self.score = float("-inf")
-        self.score_details = {}
-
-    def add_box(self, box):
-        destination = box["destination"]
-        self.cargo_count += 1
-        self.destination_counts[destination] = self.destination_counts.get(destination, 0) + 1
-        self.destination_distances_km[destination] = distance_km(self.location, destination)
-        self.destination_boxes.setdefault(destination, []).append(box)
-        self.boxes.append(box)
-
-    def __repr__(self):
-        return (
-            f"Hub(location={self.location}, "
-            f"cargo_count={self.cargo_count}, "
-            f"destination_counts={self.destination_counts}, "
-            f"destination_distances_km={self.destination_distances_km}, "
-            f"score={self.score}, "
-            f"score_details={self.score_details})"
-        )
+# Tracks active vehicle plans and prevents double-dispatch
+itineraries: dict = {}
+claimed: set = set()
 
 
-def distance_km(a, b):
-    return haversine_distance_meters(a, b) / 1000.0
+def step(sim_state):
+    """Main entry point called every tick."""
+    _run_vehicles(sim_state)
+    if sim_state.tick % ASSIGN_INTERVAL == 0:
+        _assign(sim_state)
 
 
-def distance_m(a, b):
-    return haversine_distance_meters(a, b)
+def _run_vehicles(sim_state):
+    """Advance each vehicle with an itinerary that has finished its last move."""
+    vehicles = sim_state.get_vehicles()
+    boxes = sim_state.get_boxes()
+
+    for vid, v in vehicles.items():
+        if v["destination"] is not None:
+            continue
+
+        itin = itineraries.get(vid)
+        if itin is None:
+            continue
+
+        loc = v["location"]
+
+        if itin["state"] == "TO_PICKUP":
+            dist = haversine_distance_meters(loc, itin["pickup_loc"])
+            if dist <= LOAD_R:
+                loadable = [
+                    b for b in itin["box_ids"]
+                    if b in boxes
+                       and not boxes[b]["delivered"]
+                       and boxes[b]["vehicle_id"] is None
+                ]
+                if loadable:
+                    try:
+                        sim_state.load_vehicle(vid, loadable)
+                        itin["box_ids"] = loadable
+                    except Exception:
+                        pass
+                itin["state"] = "TRANSIT"
+                _advance(sim_state, vid, itin)
+            else:
+                sim_state.move_vehicle(vid, itin["pickup_loc"])
+
+        elif itin["state"] == "TRANSIT":
+            if not itin["waypoints"]:
+                cargo = list(v["cargo"])
+                if cargo:
+                    try:
+                        sim_state.unload_vehicle(vid, cargo)
+                    except Exception:
+                        pass
+                # Unclaim boxes not yet delivered so the next leg can pick them up
+                for b in itin["box_ids"]:
+                    if b in boxes and not boxes[b]["delivered"]:
+                        claimed.discard(b)
+                del itineraries[vid]
+            else:
+                wp = itin["waypoints"][0]
+                dist = haversine_distance_meters(loc, wp)
+                if dist <= ARRIVE_R:
+                    itin["waypoints"].pop(0)
+                    _advance(sim_state, vid, itin)
+                else:
+                    sim_state.move_vehicle(vid, wp)
 
 
-def normalized_edge(a, b):
-    return tuple(sorted([a, b]))
+def _advance(sim_state, vid, itin):
+    """Issue the next move_vehicle call if waypoints remain."""
+    if itin["waypoints"]:
+        sim_state.move_vehicle(vid, itin["waypoints"][0])
 
 
-def movement_cost_km(distance_km_value, vehicle_name):
-    return VEHICLE_STATS[vehicle_name]["per_km_cost"] * distance_km_value
+def _assign(sim_state):
+    """Group unassigned boxes by (location, destination) and dispatch largest clusters first."""
+    boxes = sim_state.get_boxes()
+
+    clusters: dict = {}
+    for b_id, box in boxes.items():
+        if box["delivered"] or box["vehicle_id"] is not None or b_id in claimed:
+            continue
+        key = (box["location"], box["destination"])
+        if key not in clusters:
+            clusters[key] = {"origin": box["location"], "dest": box["destination"], "box_ids": []}
+        clusters[key]["box_ids"].append(b_id)
+
+    for c in sorted(clusters.values(), key=lambda c: -len(c["box_ids"])):
+        _dispatch(sim_state, c)
 
 
-def spawn_plus_move_cost(start, end, vehicle_name, include_base_cost=True):
-    cost = movement_cost_km(distance_km(start, end), vehicle_name)
-    if include_base_cost:
-        cost += VEHICLE_STATS[vehicle_name]["base_cost"]
-    return cost
+def _dispatch(sim_state, cluster):
+    """
+    Assign the best vehicle for a cluster based on where the boxes are and where they're going.
+    Three cases:
+      A — same region: direct ground transport
+      B — cross-region, at a port: ship (large batch) or plane (small batch)
+      C — cross-region, not at a port: drive to nearest same-region port first
+    """
+    origin = cluster["origin"]
+    dest = cluster["dest"]
+    box_ids = cluster["box_ids"]
+    n = len(box_ids)
 
-
-def delivered_value_for_box_count(box_count):
-    return 120.0 * float(box_count)
-
-
-def update_stall_state(boxes):
-    undelivered_count = sum(1 for b in boxes.values() if not b["delivered"])
-
-    last = DISPATCH_STATE.get("last_undelivered_count")
-    if last is not None and undelivered_count >= last:
-        DISPATCH_STATE["stalled_ticks"] += 1
-    else:
-        DISPATCH_STATE["stalled_ticks"] = 0
-
-    DISPATCH_STATE["last_undelivered_count"] = undelivered_count
-    return DISPATCH_STATE["stalled_ticks"] >= 8
-
-
-def estimate_event_penalty(vehicle_name, active_events):
-    mode = VEHICLE_STATS[vehicle_name]["mode"]
-    penalty = 0.0
-
-    for event in active_events:
-        event_type = event.get("type")
-
-        if event_type == "ground_stop_flights" and mode == "air":
-            penalty += 1_000_000.0
-        elif event_type == "traffic" and mode == "land":
-            speed_multiplier = event.get("speed_multiplier", 0.25)
-            slowdown = max(0.0, 1.0 - speed_multiplier)
-            penalty += 1500.0 * slowdown
-        elif event_type == "oceanic_weather" and mode == "ocean":
-            penalty += 1_000_000.0
-
-    return penalty
-
-
-def project_point_to_segment_km(point, seg_start, seg_end):
-    lat_scale = 111.0
-    lon_scale = 111.0 * math.cos(math.radians((seg_start[0] + seg_end[0]) * 0.5))
-
-    ax = seg_start[1] * lon_scale
-    ay = seg_start[0] * lat_scale
-    bx = seg_end[1] * lon_scale
-    by = seg_end[0] * lat_scale
-    px = point[1] * lon_scale
-    py = point[0] * lat_scale
-
-    abx = bx - ax
-    aby = by - ay
-    apx = px - ax
-    apy = py - ay
-
-    ab2 = (abx * abx) + (aby * aby)
-    if ab2 <= 1e-9:
-        dx = px - ax
-        dy = py - ay
-        return math.sqrt(dx * dx + dy * dy), 0.0
-
-    t = ((apx * abx) + (apy * aby)) / ab2
-    t_clamped = max(0.0, min(1.0, t))
-
-    qx = ax + (t_clamped * abx)
-    qy = ay + (t_clamped * aby)
-
-    dx = px - qx
-    dy = py - qy
-    d = math.sqrt(dx * dx + dy * dy)
-
-    return d, t_clamped
-
-
-def is_land_route_allowed(start, end):
-    edge = normalized_edge(start, end)
-
-    if LAND_DIRECT_EDGES:
-        return edge in LAND_DIRECT_EDGES
-
-    return distance_km(start, end) <= _MAX_DIRECT_LAND_KM
-
-
-def is_likely_ocean_route(start, end):
-    d = distance_km(start, end)
-
-    if d < _MIN_SHIP_ROUTE_KM:
+    if n == 0:
         return False
 
-    if is_land_route_allowed(start, end):
-        return False
+    src_region = _region(origin)
+    dst_region = _region(dest)
+    at_port = _near_any(origin, OCEAN_PORTS)
 
-    return True
-
-
-def is_ocean_route_allowed(start, end):
-    edge = normalized_edge(start, end)
-
-    if OCEAN_DIRECT_EDGES:
-        return edge in OCEAN_DIRECT_EDGES
-
-    return is_likely_ocean_route(start, end)
-
-
-def is_route_allowed(start, end, vehicle_name):
-    mode = VEHICLE_STATS[vehicle_name]["mode"]
-
-    if mode == "air":
-        if vehicle_name == "Drone" and distance_km(start, end) > _MAX_DIRECT_DRONE_KM:
+    if src_region == dst_region:
+        vtype = VehicleType.Train if n >= TRAIN_MIN_BOXES else VehicleType.SemiTruck
+        selected = box_ids[:vtype.value.capacity]
+        vid = _find_idle_ground(sim_state, vtype, origin)
+        if not vid:
+            vid = _spawn(sim_state, vtype, _nearest(origin, SHIPPING_HUBS))
+        if not vid:
             return False
+        claimed.update(selected)
+        itineraries[vid] = {
+            "state": "TO_PICKUP", "pickup_loc": origin,
+            "box_ids": selected, "waypoints": _land_wps(origin, dest) + [dest],
+        }
         return True
 
-    if mode == "land":
-        return is_land_route_allowed(start, end)
-
-    if mode == "ocean":
-        return is_ocean_route_allowed(start, end)
-
-    return False
-
-
-def route_distance_km(stops, start_location):
-    if not stops:
-        return 0.0
-
-    total = 0.0
-    current = start_location
-    for stop in stops:
-        total += distance_km(current, stop)
-        current = stop
-    return total
-
-
-def route_is_fully_allowed(start_location, stops, vehicle_name):
-    current = start_location
-    for stop in stops:
-        if not is_route_allowed(current, stop, vehicle_name):
+    elif at_port:
+        dst_port = _nearest(dest, OCEAN_PORTS)
+        if n >= SHIP_MIN_BOXES:
+            vtype = VehicleType.CargoShip
+            selected = box_ids[:vtype.value.capacity]
+            wps = _ocean_wps(origin, dst_port) + [dst_port]
+            spawn = origin
+        else:
+            vtype = VehicleType.Airplane
+            selected = box_ids[:vtype.value.capacity]
+            wps = [_nearest(dest, AIRPORTS)]
+            spawn = _nearest(origin, AIRPORTS)
+        vid = _spawn(sim_state, vtype, spawn)
+        if not vid:
             return False
-        current = stop
-    return True
-
-
-def compute_center(points):
-    lat = sum(p[0] for p in points) / max(1, len(points))
-    lon = sum(p[1] for p in points) / max(1, len(points))
-    return (lat, lon)
-
-
-def cluster_destinations(destination_to_boxes):
-    destinations = list(destination_to_boxes.keys())
-    clusters = []
-
-    for dest in destinations:
-        placed = False
-        for cluster in clusters:
-            center = cluster["center"]
-            if distance_km(dest, center) <= _CLUSTER_RADIUS_KM:
-                cluster["destinations"].append(dest)
-                cluster["boxes"].extend(destination_to_boxes[dest])
-                cluster["center"] = compute_center(cluster["destinations"])
-                placed = True
-                break
-
-        if not placed:
-            clusters.append({
-                "center": dest,
-                "destinations": [dest],
-                "boxes": list(destination_to_boxes[dest]),
-            })
-
-    return clusters
-
-
-def choose_anchor_destination(hub_location, cluster_destinations_list):
-    best_dest = None
-    best_dist = -1.0
-
-    for dest in cluster_destinations_list:
-        d = distance_km(hub_location, dest)
-        if d > best_dist:
-            best_dist = d
-            best_dest = dest
-
-    return best_dest
-
-
-def sort_stops_from_hub(hub_location, destinations):
-    return sorted(destinations, key=lambda d: distance_km(hub_location, d))
-
-
-def pick_cluster_boxes_for_vehicle(hub_location, cluster, vehicle_name):
-    capacity = VEHICLE_STATS[vehicle_name]["capacity"]
-    destinations = cluster["destinations"]
-    anchor = choose_anchor_destination(hub_location, destinations)
-    if anchor is None:
-        return [], []
-
-    selected_destinations = []
-
-    for dest in destinations:
-        corridor_distance_km, progress = project_point_to_segment_km(dest, hub_location, anchor)
-
-        if dest == anchor:
-            selected_destinations.append(dest)
-            continue
-
-        if corridor_distance_km <= _ENROUTE_CORRIDOR_KM and progress >= _ENROUTE_PROGRESS_MIN:
-            selected_destinations.append(dest)
-
-    if anchor not in selected_destinations:
-        selected_destinations.append(anchor)
-
-    selected_destinations = sort_stops_from_hub(hub_location, list(set(selected_destinations)))
-
-    selected_boxes = []
-    stop_box_ids = {dest: [] for dest in selected_destinations}
-
-    for dest in selected_destinations:
-        boxes_for_dest = sorted(
-            [
-                b for b in cluster["boxes"]
-                if b["destination"] == dest and not b["delivered"] and b["vehicle_id"] is None
-            ],
-            key=lambda b: distance_km(hub_location, b["destination"]),
-        )
-
-        for box in boxes_for_dest:
-            if len(selected_boxes) >= capacity:
-                break
-            selected_boxes.append(box)
-            stop_box_ids[dest].append(box["id"])
-
-        if len(selected_boxes) >= capacity:
-            break
-
-    final_stops = [dest for dest in selected_destinations if stop_box_ids.get(dest)]
-    return selected_boxes, [{"location": stop, "box_ids": stop_box_ids[stop]} for stop in final_stops]
-
-
-def estimate_capacity_penalty(vehicle_name, box_count):
-    capacity = VEHICLE_STATS[vehicle_name]["capacity"]
-    if box_count <= capacity:
-        return 0.0
-    overflow = box_count - capacity
-    return 10_000.0 + (1000.0 * overflow)
-
-
-def estimate_scale_penalty(vehicle_name, total_available_boxes, route_distance_total_km):
-    capacity = VEHICLE_STATS[vehicle_name]["capacity"]
-    trips_needed = math.ceil(total_available_boxes / max(1, capacity))
-    penalty = (trips_needed - 1) * 150.0
-
-    if vehicle_name == "Drone":
-        penalty += (trips_needed - 1) * 2500.0
-        if total_available_boxes > 5:
-            penalty += 10_000.0
-        if route_distance_total_km > 120.0:
-            penalty += 9_000.0
-
-    if vehicle_name == "Airplane":
-        if total_available_boxes < 20:
-            penalty += 5_000.0
-        if route_distance_total_km < 2200.0:
-            penalty += 9_000.0
-        if total_available_boxes < 40:
-            penalty += 8_000.0
-
-    if vehicle_name == "Train" and total_available_boxes < 15:
-        penalty += 400.0
-
-    if vehicle_name == "CargoShip" and total_available_boxes < 20:
-        penalty += 600.0
-
-    return penalty
-
-
-def estimate_surface_bias_adjustment(vehicle_name, route_distance_total_km, box_count):
-    adjustment = 0.0
-    reasons = []
-
-    if vehicle_name == "SemiTruck":
-        if 10 <= box_count <= 50:
-            adjustment -= 120.0
-            reasons.append("truck_good_scale")
-        if route_distance_total_km <= 800.0:
-            adjustment -= 100.0
-            reasons.append("truck_good_distance")
-
-    if vehicle_name == "Train":
-        if box_count >= 20:
-            adjustment -= 180.0
-            reasons.append("train_bulk_reward")
-        if route_distance_total_km >= 300.0:
-            adjustment -= 120.0
-            reasons.append("train_medium_long_reward")
-
-    if vehicle_name == "CargoShip":
-        if box_count >= 25:
-            adjustment -= 600.0
-            reasons.append("ship_bulk_reward")
-        if route_distance_total_km >= 800.0:
-            adjustment -= 800.0
-            reasons.append("ship_long_ocean_reward")
-
-    return adjustment, reasons
-
-
-def airplane_hard_gate(vehicle_name, box_count, route_distance_total_km, cheaper_surface_candidates):
-    if vehicle_name not in ("Airplane", "Drone"):
-        return True, []
-
-    reasons = []
-
-    if vehicle_name == "Drone":
-        if box_count > 3:
-            reasons.append("drone_box_count_too_high")
-        if route_distance_total_km > 100.0:
-            reasons.append("drone_route_too_long")
-        if cheaper_surface_candidates:
-            reasons.append("surface_available_for_drone")
-        return len(reasons) == 0, reasons
-
-    if "CargoShip" in cheaper_surface_candidates:
-        reasons.append("cargo_ship_available")
-    elif cheaper_surface_candidates and box_count < 60:
-        reasons.append("surface_available")
-
-    if route_distance_total_km < 2200.0:
-        reasons.append("plane_route_too_short")
-
-    if box_count < 40:
-        reasons.append("plane_box_count_too_low")
-
-    return len(reasons) == 0, reasons
-
-
-def soft_air_penalty(vehicle_name, box_count, route_distance_total_km, cheaper_surface_candidates, emergency_mode=False):
-    penalty = 0.0
-    reasons = []
-
-    if vehicle_name == "Drone":
-        if cheaper_surface_candidates and not emergency_mode:
-            penalty += 12000.0
-            reasons.append("surface_available_for_drone")
-        if box_count > 3 and not emergency_mode:
-            penalty += 8000.0
-            reasons.append("drone_box_count_high")
-        if route_distance_total_km > 100.0:
-            penalty += 12000.0
-            reasons.append("drone_route_too_long")
-
-    elif vehicle_name == "Airplane":
-        if "CargoShip" in cheaper_surface_candidates and not emergency_mode:
-            penalty += 20000.0
-            reasons.append("ship_available_for_plane_route")
-        elif cheaper_surface_candidates and not emergency_mode:
-            penalty += 12000.0
-            reasons.append("surface_available_for_plane")
-
-        if route_distance_total_km < 2200.0 and not emergency_mode:
-            penalty += 9000.0
-            reasons.append("plane_route_too_short")
-
-        if box_count < 40 and not emergency_mode:
-            penalty += 7000.0
-            reasons.append("plane_box_count_too_low")
-
-    return penalty, reasons
-
-
-def compute_candidate_costs(
-    vehicle_start,
-    pickup_location,
-    stops,
-    vehicle_name,
-    box_count,
-    total_available_boxes,
-    active_events,
-    include_base_cost=True,
-):
-    route_stops_only = [s["location"] for s in stops]
-    total_route_distance_km = route_distance_km(route_stops_only, pickup_location)
-
-    base_visit_cost = spawn_plus_move_cost(
-        vehicle_start,
-        pickup_location,
-        vehicle_name,
-        include_base_cost=include_base_cost,
-    )
-
-    delivery_cost = 0.0
-    current = pickup_location
-    for stop in stops:
-        delivery_cost += movement_cost_km(distance_km(current, stop["location"]), vehicle_name)
-        current = stop["location"]
-
-    handling_cost = float(box_count)
-    event_penalty = estimate_event_penalty(vehicle_name, active_events)
-    capacity_penalty = estimate_capacity_penalty(vehicle_name, box_count)
-    scale_penalty = estimate_scale_penalty(vehicle_name, total_available_boxes, total_route_distance_km)
-    surface_adjustment, surface_adjustment_reasons = estimate_surface_bias_adjustment(
-        vehicle_name,
-        total_route_distance_km,
-        box_count,
-    )
-
-    total_cost = (
-        base_visit_cost
-        + delivery_cost
-        + handling_cost
-        + event_penalty
-        + capacity_penalty
-        + scale_penalty
-        + surface_adjustment
-    )
-
-    return {
-        "base_visit_cost": base_visit_cost,
-        "delivery_cost": delivery_cost,
-        "handling_cost": handling_cost,
-        "event_penalty": event_penalty,
-        "capacity_penalty": capacity_penalty,
-        "scale_penalty": scale_penalty,
-        "surface_adjustment": surface_adjustment,
-        "surface_adjustment_reasons": surface_adjustment_reasons,
-        "total_cost": total_cost,
-        "total_route_distance_km": total_route_distance_km,
-    }
-
-
-def score_cluster_route_details(
-    vehicle_start,
-    pickup_location,
-    cluster,
-    vehicle_name,
-    active_events=None,
-    include_base_cost=True,
-    emergency_mode=False,
-):
-    active_events = active_events or []
-
-    selected_boxes, stops = pick_cluster_boxes_for_vehicle(pickup_location, cluster, vehicle_name)
-    if not selected_boxes or not stops:
-        return None
-
-    if not is_route_allowed(vehicle_start, pickup_location, vehicle_name):
-        log(
-            "CANDIDATE_FAIL",
-            "hub=", pickup_location,
-            "vehicle=", vehicle_name,
-            "reason=start_to_pickup_not_allowed",
-        )
-        return None
-
-    current = pickup_location
-    for stop in stops:
-        if not is_route_allowed(current, stop["location"], vehicle_name):
-            log(
-                "CANDIDATE_FAIL",
-                "hub=", pickup_location,
-                "vehicle=", vehicle_name,
-                "reason=route_leg_not_allowed",
-                "from=", current,
-                "to=", stop["location"],
-            )
-            return None
-        current = stop["location"]
-
-    box_count = len(selected_boxes)
-    route_stops_only = [s["location"] for s in stops]
-
-    cheaper_surface_candidates = []
-    for surface_vehicle in ("SemiTruck", "Train", "CargoShip"):
-        if surface_vehicle == vehicle_name:
-            continue
-        if route_is_fully_allowed(pickup_location, route_stops_only, surface_vehicle):
-            cheaper_surface_candidates.append(surface_vehicle)
-
-    cost_details = compute_candidate_costs(
-        vehicle_start=vehicle_start,
-        pickup_location=pickup_location,
-        stops=stops,
-        vehicle_name=vehicle_name,
-        box_count=box_count,
-        total_available_boxes=len(cluster["boxes"]),
-        active_events=active_events,
-        include_base_cost=include_base_cost,
-    )
-
-    allow_air, reject_reasons = airplane_hard_gate(
-        vehicle_name=vehicle_name,
-        box_count=box_count,
-        route_distance_total_km=cost_details["total_route_distance_km"],
-        cheaper_surface_candidates=cheaper_surface_candidates,
-    )
-
-    if not allow_air and not emergency_mode:
-        return None
-
-    air_penalty, air_penalty_reasons = soft_air_penalty(
-        vehicle_name=vehicle_name,
-        box_count=box_count,
-        route_distance_total_km=cost_details["total_route_distance_km"],
-        cheaper_surface_candidates=cheaper_surface_candidates,
-        emergency_mode=emergency_mode,
-    )
-
-    total_cost = cost_details["total_cost"] + air_penalty
-    delivered_value = delivered_value_for_box_count(box_count)
-    net_value = delivered_value - total_cost
-    cost_per_box = total_cost / max(1, box_count)
+        claimed.update(selected)
+        itineraries[vid] = {
+            "state": "TO_PICKUP", "pickup_loc": origin,
+            "box_ids": selected, "waypoints": wps,
+        }
+        return True
 
     if emergency_mode:
         score = net_value - (2.0 * cost_per_box)
@@ -1169,3 +769,396 @@ def step(sim_state):
         log("=== INITIAL HUB SNAPSHOT ===")
         for location, hub in hubs.items():
             log(location, hub)
+=======
+
+AIRPORTS = [
+    {'id': 'los_angeles_international_airport',         'lat':  33.9425, 'lon': -118.4081},
+    {'id': 'john_f_kennedy_international_airport',      'lat':  40.6413, 'lon':  -73.7781},
+    {'id': 'ohare_international_airport',               'lat':  41.9742, 'lon':  -87.9073},
+    {'id': 'dallas_fort_worth_international_airport',   'lat':  32.8998, 'lon':  -97.0403},
+    {'id': 'miami_international_airport',               'lat':  25.7959, 'lon':  -80.2870},
+    {'id': 'seattle_tacoma_international_airport',      'lat':  47.4502, 'lon': -122.3088},
+    {'id': 'heathrow_airport',                          'lat':  51.4700, 'lon':   -0.4543},
+    {'id': 'frankfurt_airport',                         'lat':  50.0379, 'lon':    8.5622},
+    {'id': 'dubai_international_airport',               'lat':  25.2532, 'lon':   55.3657},
+    {'id': 'chhatrapati_shivaji_maharaj_international', 'lat':  19.0896, 'lon':   72.8656},
+    {'id': 'singapore_changi_airport',                  'lat':   1.3644, 'lon':  103.9915},
+    {'id': 'haneda_airport',                            'lat':  35.5494, 'lon':  139.7798},
+    {'id': 'sydney_kingsford_smith_airport',            'lat': -33.9461, 'lon':  151.1772},
+    {'id': 'guarulhos_international_airport',           'lat': -23.4356, 'lon':  -46.4731},
+    {'id': 'or_tambo_international_airport',            'lat': -26.1367, 'lon':   28.2411},
+    {'id': 'jomo_kenyatta_international_airport',       'lat':  -1.3192, 'lon':   36.9275},
+    {'id': 'mexico_city_international_airport',         'lat':  19.4361, 'lon':  -99.0719},
+    {'id': 'toronto_pearson_international_airport',     'lat':  43.6777, 'lon':  -79.6248},
+]
+
+OCEAN_PORTS = [
+    {'id': 'port_of_los_angeles',     'lat':  33.7361, 'lon': -118.2639},
+    {'id': 'port_of_new_york_and_nj', 'lat':  40.6681, 'lon':  -74.0455},
+    {'id': 'port_of_chicago',         'lat':  41.8800, 'lon':  -87.6200},
+    {'id': 'portmiami',               'lat':  25.7781, 'lon':  -80.1794},
+    {'id': 'port_of_seattle',         'lat':  47.6026, 'lon': -122.3382},
+    {'id': 'port_of_london',          'lat':  51.5074, 'lon':   -0.0174},
+    {'id': 'port_of_hamburg',         'lat':  53.5461, 'lon':    9.9661},
+    {'id': 'jebel_ali_port',          'lat':  25.0108, 'lon':   55.0617},
+    {'id': 'jawaharlal_nehru_port',   'lat':  18.9498, 'lon':   72.9483},
+    {'id': 'port_of_singapore',       'lat':   1.2644, 'lon':  103.8200},
+    {'id': 'port_of_tokyo',           'lat':  35.6296, 'lon':  139.7773},
+    {'id': 'port_botany',             'lat': -33.9656, 'lon':  151.2010},
+    {'id': 'port_of_santos',          'lat': -23.9608, 'lon':  -46.3288},
+    {'id': 'port_of_durban',          'lat': -29.8713, 'lon':   31.0262},
+    {'id': 'port_of_mombasa',         'lat':  -4.0435, 'lon':   39.6682},
+    {'id': 'port_of_toronto',         'lat':  43.6407, 'lon':  -79.3590},
+    {'id': 'port_of_veracruz',        'lat':  19.2010, 'lon':  -96.1342},
+]
+
+SHIPPING_HUBS = [
+    {'id': 'los_angeles_distribution_center', 'lat':  33.9425, 'lon': -118.4081},
+    {'id': 'new_york_distribution_center',    'lat':  40.6413, 'lon':  -73.7781},
+    {'id': 'chicago_distribution_center',     'lat':  41.9742, 'lon':  -87.9073},
+    {'id': 'dallas_distribution_center',      'lat':  32.8481, 'lon':  -97.0403},
+    {'id': 'miami_distribution_center',       'lat':  25.7959, 'lon':  -80.2870},
+    {'id': 'seattle_distribution_center',     'lat':  47.4502, 'lon': -122.3088},
+    {'id': 'london_hub',                      'lat':  51.5074, 'lon':   -0.1278},
+    {'id': 'frankfurt_distribution_center',   'lat':  50.1109, 'lon':    8.6821},
+    {'id': 'dubai_hub',                       'lat':  25.2048, 'lon':   55.2708},
+    {'id': 'mumbai_distribution_center',      'lat':  19.0760, 'lon':   72.8777},
+    {'id': 'singapore_hub',                   'lat':   1.3521, 'lon':  103.8198},
+    {'id': 'tokyo_distribution_center',       'lat':  35.6762, 'lon':  139.6503},
+    {'id': 'sydney_hub',                      'lat': -33.8688, 'lon':  151.2093},
+    {'id': 'sao_paulo_distribution_center',   'lat': -23.5505, 'lon':  -46.6333},
+    {'id': 'johannesburg_hub',                'lat': -26.2041, 'lon':   28.0473},
+    {'id': 'nairobi_distribution_center',     'lat':  -1.2921, 'lon':   36.8219},
+    {'id': 'mexico_city_hub',                 'lat':  19.4326, 'lon':  -99.1332},
+    {'id': 'toronto_hub',                     'lat':  43.6532, 'lon':  -79.3832},
+]
+
+# Proximity thresholds (metres)
+LOAD_R          = 50.0
+ARRIVE_R        = 100.0
+INFRA_R         = 5_000.0
+
+# How often to run the dispatch pass, and vehicle selection thresholds
+ASSIGN_INTERVAL = 10
+TRAIN_MIN_BOXES = 30
+SHIP_MIN_BOXES  = 20
+
+# Canal waypoints for ships (Rarely Used)
+PANAMA      = (8.99,    -79.57)
+SUEZ        = (30.58,    32.26)
+
+# Land waypoints to keep trucks off water
+FLORIDA_GW  = (30.33,   -81.65)   # Jacksonville - Florida peninsula
+UPPER_CHINA = (43.8627,  118.754) # Inner Mongolia - Singapore <-> Tokyo
+CENT_AFRICA = (4.371,    33.366)  # South Sudan - Johannesburg <-> north
+EGYPT_GW    = (29.06,    40.00)   # Cairo - Nairobi <-> Dubai/Mumbai
+SAO_GW1     = (15.861,  -87.80)  # Guatemala - Central American land bridge
+SAO_GW2     = (30.50,  -113.50)   # SE New Mexico - Sao Paulo <-> North America
+
+# Tracks active vehicle plans and prevents double-dispatch
+itineraries: dict = {}
+claimed: set = set()
+
+
+def step(sim_state):
+    """Main entry point called every tick."""
+    _run_vehicles(sim_state)
+    if sim_state.tick % ASSIGN_INTERVAL == 0:
+        _assign(sim_state)
+
+
+def _run_vehicles(sim_state):
+    """Advance each vehicle with an itinerary that has finished its last move."""
+    vehicles = sim_state.get_vehicles()
+    boxes = sim_state.get_boxes()
+
+    for vid, v in vehicles.items():
+        if v["destination"] is not None:
+            continue
+
+        itin = itineraries.get(vid)
+        if itin is None:
+            continue
+
+        loc = v["location"]
+
+        if itin["state"] == "TO_PICKUP":
+            dist = haversine_distance_meters(loc, itin["pickup_loc"])
+            if dist <= LOAD_R:
+                loadable = [
+                    b for b in itin["box_ids"]
+                    if b in boxes
+                       and not boxes[b]["delivered"]
+                       and boxes[b]["vehicle_id"] is None
+                ]
+                if loadable:
+                    try:
+                        sim_state.load_vehicle(vid, loadable)
+                        itin["box_ids"] = loadable
+                    except Exception:
+                        pass
+                itin["state"] = "TRANSIT"
+                _advance(sim_state, vid, itin)
+            else:
+                sim_state.move_vehicle(vid, itin["pickup_loc"])
+
+        elif itin["state"] == "TRANSIT":
+            if not itin["waypoints"]:
+                cargo = list(v["cargo"])
+                if cargo:
+                    try:
+                        sim_state.unload_vehicle(vid, cargo)
+                    except Exception:
+                        pass
+                # Unclaim boxes not yet delivered so the next leg can pick them up
+                for b in itin["box_ids"]:
+                    if b in boxes and not boxes[b]["delivered"]:
+                        claimed.discard(b)
+                del itineraries[vid]
+            else:
+                wp = itin["waypoints"][0]
+                dist = haversine_distance_meters(loc, wp)
+                if dist <= ARRIVE_R:
+                    itin["waypoints"].pop(0)
+                    _advance(sim_state, vid, itin)
+                else:
+                    sim_state.move_vehicle(vid, wp)
+
+
+def _advance(sim_state, vid, itin):
+    """Issue the next move_vehicle call if waypoints remain."""
+    if itin["waypoints"]:
+        sim_state.move_vehicle(vid, itin["waypoints"][0])
+
+
+def _assign(sim_state):
+    """Group unassigned boxes by (location, destination) and dispatch largest clusters first."""
+    boxes = sim_state.get_boxes()
+
+    clusters: dict = {}
+    for b_id, box in boxes.items():
+        if box["delivered"] or box["vehicle_id"] is not None or b_id in claimed:
+            continue
+        key = (box["location"], box["destination"])
+        if key not in clusters:
+            clusters[key] = {"origin": box["location"], "dest": box["destination"], "box_ids": []}
+        clusters[key]["box_ids"].append(b_id)
+
+    for c in sorted(clusters.values(), key=lambda c: -len(c["box_ids"])):
+        _dispatch(sim_state, c)
+
+
+def _dispatch(sim_state, cluster):
+    """
+    Assign the best vehicle for a cluster based on where the boxes are and where they're going.
+    Three cases:
+      A — same region: direct ground transport
+      B — cross-region, at a port: ship (large batch) or plane (small batch)
+      C — cross-region, not at a port: drive to nearest same-region port first
+    """
+    origin = cluster["origin"]
+    dest = cluster["dest"]
+    box_ids = cluster["box_ids"]
+    n = len(box_ids)
+
+    if n == 0:
+        return False
+
+    src_region = _region(origin)
+    dst_region = _region(dest)
+    at_port = _near_any(origin, OCEAN_PORTS)
+
+    if src_region == dst_region:
+        vtype = VehicleType.Train if n >= TRAIN_MIN_BOXES else VehicleType.SemiTruck
+        selected = box_ids[:vtype.value.capacity]
+        vid = _find_idle_ground(sim_state, vtype, origin)
+        if not vid:
+            vid = _spawn(sim_state, vtype, _nearest(origin, SHIPPING_HUBS))
+        if not vid:
+            return False
+        claimed.update(selected)
+        itineraries[vid] = {
+            "state": "TO_PICKUP", "pickup_loc": origin,
+            "box_ids": selected, "waypoints": _land_wps(origin, dest) + [dest],
+        }
+        return True
+
+    elif at_port:
+        dst_port = _nearest(dest, OCEAN_PORTS)
+        if n >= SHIP_MIN_BOXES:
+            vtype = VehicleType.CargoShip
+            selected = box_ids[:vtype.value.capacity]
+            wps = _ocean_wps(origin, dst_port) + [dst_port]
+            spawn = origin
+        else:
+            vtype = VehicleType.Airplane
+            selected = box_ids[:vtype.value.capacity]
+            wps = [_nearest(dest, AIRPORTS)]
+            spawn = _nearest(origin, AIRPORTS)
+        vid = _spawn(sim_state, vtype, spawn)
+        if not vid:
+            return False
+        claimed.update(selected)
+        itineraries[vid] = {
+            "state": "TO_PICKUP", "pickup_loc": origin,
+            "box_ids": selected, "waypoints": wps,
+        }
+        return True
+
+    else:
+        src_port = _nearest_same_region(origin, OCEAN_PORTS) or _nearest(origin, OCEAN_PORTS)
+        vtype = VehicleType.Train if n >= TRAIN_MIN_BOXES else VehicleType.SemiTruck
+        selected = box_ids[:vtype.value.capacity]
+        vid = _find_idle_ground(sim_state, vtype, origin)
+        if not vid:
+            vid = _spawn(sim_state, vtype, _nearest(origin, SHIPPING_HUBS))
+        if not vid:
+            return False
+        claimed.update(selected)
+        itineraries[vid] = {
+            "state": "TO_PICKUP", "pickup_loc": origin,
+            "box_ids": selected, "waypoints": _land_wps(origin, src_port) + [src_port],
+        }
+        return True
+
+
+def _find_idle_ground(sim_state, vtype, pickup_loc):
+    """Return the nearest idle vehicle of the given type if reusing it is cheaper than spawning a new one."""
+    best_vid, best_cost = None, float("inf")
+    for vid, v in sim_state.get_vehicles().items():
+        if v["vehicle_type"] != vtype.name or v["destination"] is not None:
+            continue
+        itin = itineraries.get(vid)
+        if itin is not None and itin.get("waypoints"):
+            continue
+        cost = haversine_distance_meters(v["location"], pickup_loc) / 1000.0 * vtype.value.per_km_cost
+        if cost < (vtype.value.base_cost * 2) and cost < best_cost:
+            best_cost, best_vid = cost, vid
+    return best_vid
+
+
+def _region(loc):
+    """Return the broad continental region for a (lat, lon) coordinate."""
+    lat, lon = loc
+    if lon < -30:              return "AMERICAS"
+    if lat > 0 and lon >= 100: return "EAST_ASIA"
+    if lat <= 0 and lon >= 100: return "OCEANIA"
+    return "EURASIA_AFRICA"
+
+
+def _nearest(loc, infra):
+    """Return the (lat, lon) of the closest item in an infrastructure list."""
+    best_d, best_c = float("inf"), None
+    for item in infra:
+        d = haversine_distance_meters(loc, (item["lat"], item["lon"]))
+        if d < best_d:
+            best_d, best_c = d, (item["lat"], item["lon"])
+    return best_c
+
+
+def _nearest_same_region(loc, infra):
+    """Return the closest infra item in the same region as loc, or None."""
+    loc_region = _region(loc)
+    best_d, best_c = float("inf"), None
+    for item in infra:
+        coord = (item["lat"], item["lon"])
+        if _region(coord) != loc_region:
+            continue
+        d = haversine_distance_meters(loc, coord)
+        if d < best_d:
+            best_d, best_c = d, coord
+    return best_c
+
+
+def _near_any(loc, infra):
+    """Return True if loc is within INFRA_R metres of any item in the list."""
+    return any(haversine_distance_meters(loc, (i["lat"], i["lon"])) <= INFRA_R for i in infra)
+
+
+def _ocean_wps(src, dst):
+    """Return a Panama or Suez waypoint if needed to keep a ship in navigable water."""
+    sx, dx = src[1], dst[1]
+    if sx < -30 and -30 <= dx < 100:  return [PANAMA]
+    if -30 <= sx < 100 and dx < -30:  return [PANAMA]
+    if -30 <= sx < 100 and dx >= 100: return [SUEZ]
+    if sx >= 100 and -30 <= dx < 100: return [SUEZ]
+    return []
+
+
+def _land_wps(src, dst):
+    """Return waypoints to keep a ground vehicle on solid ground between src and dst."""
+    wps = []
+    src_r = _region(src)
+    dst_r = _region(dst)
+
+    if src_r == "AMERICAS" and dst_r == "AMERICAS":
+        def _south_fl(loc):
+            return loc[0] < 30.5 and loc[1] > -82.5
+
+        def _south_am(loc):
+            return loc[0] < 9.0
+
+        def _north_am(loc):
+            return loc[0] > 25.0
+
+        if _south_am(src) and _north_am(dst):
+            wps.extend([SAO_GW1, SAO_GW2])
+            if _south_fl(dst): wps.append(FLORIDA_GW)
+            return wps
+        if _north_am(src) and _south_am(dst):
+            if _south_fl(src): wps.append(FLORIDA_GW)
+            wps.extend([SAO_GW2, SAO_GW1])
+            return wps
+        if _south_fl(src) != _south_fl(dst):
+            wps.append(FLORIDA_GW)
+        return wps
+
+    if src_r == "EURASIA_AFRICA" and dst_r == "EURASIA_AFRICA":
+        def _s_africa(loc):
+            return loc[0] < -15.0 and 15.0 < loc[1] < 45.0
+
+        def _e_africa(loc):
+            return -5.0 < loc[0] < 15.0 and 30.0 < loc[1] < 50.0
+
+        def _mideast(loc):
+            return loc[0] > 10.0 and 45.0 < loc[1] < 85.0
+
+        if _s_africa(src) != _s_africa(dst):
+            wps.append(CENT_AFRICA)
+        if _e_africa(src) and _mideast(dst) or _mideast(src) and _e_africa(dst):
+            wps.append(EGYPT_GW)
+        return wps
+
+    if src_r == "EAST_ASIA" and dst_r == "EAST_ASIA":
+        def _se_asia(loc):
+            return loc[0] < 15.0 and loc[1] >= 100.0
+
+        def _japan(loc):
+            return loc[0] > 30.0 and loc[1] > 125.0
+
+        if _se_asia(src) and _japan(dst) or _japan(src) and _se_asia(dst):
+            wps.append(UPPER_CHINA)
+        return wps
+
+    if {src_r, dst_r} == {"EAST_ASIA", "EURASIA_AFRICA"}:
+        wps.append(EGYPT_GW)
+
+    return wps
+
+
+def _spawn(sim_state, vtype, preferred_loc):
+    """Try to spawn a vehicle at preferred_loc, falling back through the appropriate infra list."""
+    if vtype in (VehicleType.SemiTruck, VehicleType.Train):
+        fallback = [h for h in SHIPPING_HUBS if _region((h["lat"], h["lon"])) != "OCEANIA"]
+    elif vtype == VehicleType.CargoShip:
+        fallback = OCEAN_PORTS
+    else:
+        fallback = AIRPORTS
+
+    for loc in [preferred_loc] + [(i["lat"], i["lon"]) for i in fallback]:
+        try:
+            return sim_state.create_vehicle(vtype, loc)
+        except (ValueError, TypeError):
+            continue
+    return None
+>>>>>>> 028c5ea41f1b2d0b55e092c54f28d7f926970e14
