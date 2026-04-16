@@ -59,6 +59,7 @@ def step(sim_state):
     if tick == 0:
         _print_facilities(sim_state)
         boxes = sim_state.get_boxes()
+        print(boxes)
         seen_hubs = set()
         vehicle_types = list(VehicleType)
         for box in boxes.values():
