@@ -214,6 +214,29 @@ for lat, lon in hubs:
     print(lat, lon)
 ```
 
+### `get_shipping_hub_details() → tuple[dict, ...]`
+
+Returns an immutable snapshot of full shipping hub objects from bootstrap data.
+
+```python
+hub_details = sim_state.get_shipping_hub_details()
+for hub in hub_details:
+    print(hub["id"], hub["name"], hub["location"]["lat"], hub["location"]["lon"])
+
+    # Hubs include their configured boxes list (if present)
+    for box in hub.get("boxes", []):
+        print("  box", box["id"], "->", box.get("destination_hub", box.get("destination")))
+```
+
+Each shipping hub dict contains bootstrap keys such as:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `id` | `str` | Hub ID |
+| `name` | `str` | Hub display name |
+| `location` | `dict` | `{"lat": float, "lon": float}` |
+| `boxes` | `list[dict]` | Boxes configured at this hub (if provided) |
+
 ---
 
 ### `get_airports() → tuple[(float, float), ...]`
@@ -225,6 +248,31 @@ When no `airports` are defined in bootstrap, this returns the fallback hub locat
 airports = sim_state.get_airports()
 ```
 
+### `get_airport_details() → tuple[dict, ...]`
+
+Returns an immutable snapshot of full airport objects.
+
+- When `airports` are defined in bootstrap, returns those airport objects.
+- When `airports` are omitted, returns fallback airport objects derived from shipping hubs.
+
+```python
+airport_details = sim_state.get_airport_details()
+for airport in airport_details:
+    airport_id = airport["id"]
+    airport_name = airport["name"]
+    lat = airport["location"]["lat"]
+    lon = airport["location"]["lon"]
+    print(airport_id, airport_name, lat, lon)
+```
+
+Each airport dict contains bootstrap keys such as:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `id` | `str` | Airport ID |
+| `name` | `str` | Airport display name |
+| `location` | `dict` | `{"lat": float, "lon": float}` |
+
 ---
 
 ### `get_ocean_ports() → tuple[(float, float), ...]`
@@ -235,6 +283,25 @@ If no `ocean_ports` are configured, returns an empty tuple.
 ```python
 ocean_ports = sim_state.get_ocean_ports()
 ```
+
+### `get_ocean_port_details() → tuple[dict, ...]`
+
+Returns an immutable snapshot of full ocean port objects from bootstrap data.
+If no `ocean_ports` are configured, returns an empty tuple.
+
+```python
+ocean_port_details = sim_state.get_ocean_port_details()
+for port in ocean_port_details:
+    print(port["id"], port["name"], port["location"]["lat"], port["location"]["lon"])
+```
+
+Each ocean port dict contains bootstrap keys such as:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `id` | `str` | Ocean port ID |
+| `name` | `str` | Ocean port display name |
+| `location` | `dict` | `{"lat": float, "lon": float}` |
 
 **Event effects on movement (automatic — no action required):**
 
@@ -270,7 +337,7 @@ Moving a vehicle through its **forbidden terrain** (e.g. a SemiTruck over water)
 |--------------|-------------------|
 | `SemiTruck`, `Train` | Within **5 000 m** of a shipping hub |
 | `Airplane`, `Drone` | Within **5 000 m** of an airport (falls back to hub locations if no airports defined in bootstrap) |
-| `CargoShip` | Must be over **water** (ocean/sea), and within **5 000 m** of an ocean port when `ocean_ports` are defined |
+| `CargoShip` | Within **5 000 m** of an ocean port when `ocean_ports` are defined |
 
 Facility operation rules for cargo handling (`load_vehicle` / `unload_vehicle`):
 
@@ -287,7 +354,7 @@ These bootstrap fields drive spawn and cargo-operation restrictions:
 - `ocean_ports`: optional list of ocean-port locations used by `CargoShip`.
 
 If `airports` is omitted or empty, shipping hub locations are used as fallback airport locations.
-If `ocean_ports` is omitted or empty, cargo ships still must spawn over water, but no port-distance check is enforced.
+If `ocean_ports` is omitted or empty, cargo ships have no ocean-port distance check for spawning.
 
 Example:
 
