@@ -1,9 +1,5 @@
 from simulator import VehicleType, haversine_distance_meters
 import math
-import random
-
-SEED = 42
-random.seed(SEED)
 
 _PROXIMITY_M = 50.0
 _CLUSTER_RADIUS_KM = 150.0
@@ -11,6 +7,7 @@ _ENROUTE_CORRIDOR_KM = 80.0
 _ENROUTE_PROGRESS_MIN = 0.15
 _MAX_DIRECT_LAND_KM = 1400.0
 _MAX_DIRECT_DRONE_KM = 250.0
+_MIN_SHIP_ROUTE_KM = 600.0
 
 DEBUG = True
 
@@ -60,7 +57,6 @@ VEHICLE_STATS = {
     },
 }
 
-OCEAN_PORTS = set()
 LAND_DIRECT_EDGES = set()
 OCEAN_DIRECT_EDGES = set()
 
@@ -107,7 +103,6 @@ class Hub:
         )
 
 
-
 def distance_km(a, b):
     return haversine_distance_meters(a, b) / 1000.0
 
@@ -133,33 +128,7 @@ def spawn_plus_move_cost(start, end, vehicle_name, include_base_cost=True):
 
 def delivered_value_for_box_count(box_count):
     return 120.0 * float(box_count)
-def soft_air_penalty(vehicle_name, box_count, route_distance_total_km, cheaper_surface_candidates, emergency_mode=False):
-    penalty = 0.0
-    reasons = []
 
-    if vehicle_name == "Drone":
-        if cheaper_surface_candidates and not emergency_mode:
-            penalty += 6000.0
-            reasons.append("surface_available_for_drone")
-        if box_count > 3 and not emergency_mode:
-            penalty += 4000.0
-            reasons.append("drone_box_count_high")
-        if route_distance_total_km > 100.0:
-            penalty += 8000.0
-            reasons.append("drone_route_too_long")
-
-    elif vehicle_name == "Airplane":
-        if cheaper_surface_candidates and not emergency_mode:
-            penalty += 5000.0
-            reasons.append("surface_available_for_plane")
-        if route_distance_total_km < 1800.0 and not emergency_mode:
-            penalty += 4000.0
-            reasons.append("plane_route_too_short")
-        if box_count < 25 and not emergency_mode:
-            penalty += 3500.0
-            reasons.append("plane_box_count_too_low")
-
-    return penalty, reasons
 
 def update_stall_state(boxes):
     undelivered_count = sum(1 for b in boxes.values() if not b["delivered"])
@@ -173,86 +142,6 @@ def update_stall_state(boxes):
     DISPATCH_STATE["last_undelivered_count"] = undelivered_count
     return DISPATCH_STATE["stalled_ticks"] >= 8
 
-
-def rebuild_plan_from_current_cargo(sim_state, vehicle_id, vehicle, boxes):
-    cargo_ids = list(vehicle["cargo"])
-    if not cargo_ids:
-        return False
-
-    vehicle_name = normalize_vehicle_name(vehicle["vehicle_type"])
-    current_location = vehicle["location"]
-
-    destination_to_box_ids = {}
-
-    for box_id in cargo_ids:
-        box = boxes.get(box_id)
-        if box is None or box["delivered"]:
-            continue
-        destination_to_box_ids.setdefault(box["destination"], []).append(box_id)
-
-    if not destination_to_box_ids:
-        DISPATCH_STATE["vehicle_plans"][vehicle_id] = {
-            "phase": "idle",
-            "hub_location": current_location,
-            "pickup_location": current_location,
-            "vehicle_name": vehicle_name,
-            "stops": [],
-            "current_stop_index": 0,
-        }
-        return False
-
-    reachable = []
-    for dest, box_ids in destination_to_box_ids.items():
-        if is_route_allowed(current_location, dest, vehicle_name):
-            reachable.append({
-                "location": dest,
-                "box_ids": box_ids,
-                "distance": distance_km(current_location, dest),
-            })
-
-    if not reachable:
-        log(
-            "CARGO_REPLAN_FAIL",
-            "vehicle_id=", vehicle_id,
-            "vehicle=", vehicle_name,
-            "location=", current_location,
-            "reason=no_reachable_cargo_destination",
-            "destinations=", list(destination_to_box_ids.keys()),
-        )
-        return False
-
-    reachable.sort(key=lambda x: x["distance"])
-
-    DISPATCH_STATE["vehicle_plans"][vehicle_id] = {
-        "phase": "to_dropoff",
-        "hub_location": current_location,
-        "pickup_location": current_location,
-        "vehicle_name": vehicle_name,
-        "stops": [{"location": r["location"], "box_ids": list(r["box_ids"])} for r in reachable],
-        "current_stop_index": 0,
-    }
-
-    first_stop = reachable[0]["location"]
-    try:
-        sim_state.move_vehicle(vehicle_id, first_stop)
-        log(
-            "CARGO_REPLAN_OK",
-            "vehicle_id=", vehicle_id,
-            "vehicle=", vehicle_name,
-            "from=", current_location,
-            "to=", first_stop,
-            "remaining_stops=", [r["location"] for r in reachable],
-        )
-        return True
-    except ValueError as e:
-        log(
-            "CARGO_REPLAN_MOVE_FAIL",
-            "vehicle_id=", vehicle_id,
-            "vehicle=", vehicle_name,
-            "target=", first_stop,
-            "error=", e,
-        )
-        return False
 
 def estimate_event_penalty(vehicle_name, active_events):
     mode = VEHICLE_STATS[vehicle_name]["mode"]
@@ -317,13 +206,25 @@ def is_land_route_allowed(start, end):
     return distance_km(start, end) <= _MAX_DIRECT_LAND_KM
 
 
+def is_likely_ocean_route(start, end):
+    d = distance_km(start, end)
+
+    if d < _MIN_SHIP_ROUTE_KM:
+        return False
+
+    if is_land_route_allowed(start, end):
+        return False
+
+    return True
+
+
 def is_ocean_route_allowed(start, end):
     edge = normalized_edge(start, end)
 
     if OCEAN_DIRECT_EDGES:
         return edge in OCEAN_DIRECT_EDGES
 
-    return start in OCEAN_PORTS and end in OCEAN_PORTS
+    return is_likely_ocean_route(start, end)
 
 
 def is_route_allowed(start, end, vehicle_name):
@@ -483,17 +384,17 @@ def estimate_scale_penalty(vehicle_name, total_available_boxes, route_distance_t
 
     if vehicle_name == "Airplane":
         if total_available_boxes < 20:
-            penalty += 3_500.0
-        if route_distance_total_km < 1500.0:
-            penalty += 4_000.0
-        if total_available_boxes < 10:
-            penalty += 6_000.0
+            penalty += 5_000.0
+        if route_distance_total_km < 2200.0:
+            penalty += 9_000.0
+        if total_available_boxes < 40:
+            penalty += 8_000.0
 
     if vehicle_name == "Train" and total_available_boxes < 15:
         penalty += 400.0
 
-    if vehicle_name == "CargoShip" and total_available_boxes < 30:
-        penalty += 1_000.0
+    if vehicle_name == "CargoShip" and total_available_boxes < 20:
+        penalty += 600.0
 
     return penalty
 
@@ -519,11 +420,11 @@ def estimate_surface_bias_adjustment(vehicle_name, route_distance_total_km, box_
             reasons.append("train_medium_long_reward")
 
     if vehicle_name == "CargoShip":
-        if box_count >= 40:
-            adjustment -= 250.0
+        if box_count >= 25:
+            adjustment -= 600.0
             reasons.append("ship_bulk_reward")
-        if route_distance_total_km >= 500.0:
-            adjustment -= 200.0
+        if route_distance_total_km >= 800.0:
+            adjustment -= 800.0
             reasons.append("ship_long_ocean_reward")
 
     return adjustment, reasons
@@ -544,14 +445,52 @@ def airplane_hard_gate(vehicle_name, box_count, route_distance_total_km, cheaper
             reasons.append("surface_available_for_drone")
         return len(reasons) == 0, reasons
 
-    if cheaper_surface_candidates and box_count < 35:
-        reasons.append("surface_available_and_box_count_not_high_enough")
-    if route_distance_total_km < 1800.0:
+    if "CargoShip" in cheaper_surface_candidates:
+        reasons.append("cargo_ship_available")
+    elif cheaper_surface_candidates and box_count < 60:
+        reasons.append("surface_available")
+
+    if route_distance_total_km < 2200.0:
         reasons.append("plane_route_too_short")
-    if box_count < 25:
+
+    if box_count < 40:
         reasons.append("plane_box_count_too_low")
 
     return len(reasons) == 0, reasons
+
+
+def soft_air_penalty(vehicle_name, box_count, route_distance_total_km, cheaper_surface_candidates, emergency_mode=False):
+    penalty = 0.0
+    reasons = []
+
+    if vehicle_name == "Drone":
+        if cheaper_surface_candidates and not emergency_mode:
+            penalty += 12000.0
+            reasons.append("surface_available_for_drone")
+        if box_count > 3 and not emergency_mode:
+            penalty += 8000.0
+            reasons.append("drone_box_count_high")
+        if route_distance_total_km > 100.0:
+            penalty += 12000.0
+            reasons.append("drone_route_too_long")
+
+    elif vehicle_name == "Airplane":
+        if "CargoShip" in cheaper_surface_candidates and not emergency_mode:
+            penalty += 20000.0
+            reasons.append("ship_available_for_plane_route")
+        elif cheaper_surface_candidates and not emergency_mode:
+            penalty += 12000.0
+            reasons.append("surface_available_for_plane")
+
+        if route_distance_total_km < 2200.0 and not emergency_mode:
+            penalty += 9000.0
+            reasons.append("plane_route_too_short")
+
+        if box_count < 40 and not emergency_mode:
+            penalty += 7000.0
+            reasons.append("plane_box_count_too_low")
+
+    return penalty, reasons
 
 
 def compute_candidate_costs(
@@ -614,7 +553,6 @@ def compute_candidate_costs(
     }
 
 
-
 def score_cluster_route_details(
     vehicle_start,
     pickup_location,
@@ -674,6 +612,16 @@ def score_cluster_route_details(
         include_base_cost=include_base_cost,
     )
 
+    allow_air, reject_reasons = airplane_hard_gate(
+        vehicle_name=vehicle_name,
+        box_count=box_count,
+        route_distance_total_km=cost_details["total_route_distance_km"],
+        cheaper_surface_candidates=cheaper_surface_candidates,
+    )
+
+    if not allow_air and not emergency_mode:
+        return None
+
     air_penalty, air_penalty_reasons = soft_air_penalty(
         vehicle_name=vehicle_name,
         box_count=box_count,
@@ -705,7 +653,7 @@ def score_cluster_route_details(
         "cost_per_box": cost_per_box,
         "cheaper_surface_candidates": cheaper_surface_candidates,
         "rejected": False,
-        "reject_reasons": [],
+        "reject_reasons": reject_reasons,
         "air_penalty": air_penalty,
         "air_penalty_reasons": air_penalty_reasons,
         "emergency_mode": emergency_mode,
@@ -713,6 +661,7 @@ def score_cluster_route_details(
         **cost_details,
         "total_cost": total_cost,
     }
+
 
 def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehicle_names=None, emergency_mode=False):
     active_events = active_events or []
@@ -770,6 +719,7 @@ def best_route_for_hub(hub, active_events=None, vehicle_start=None, allowed_vehi
         )
 
     return best
+
 
 def build_hubs(boxes):
     hubs = {}
@@ -1142,9 +1092,13 @@ def step(sim_state):
         active_events = []
         log("get_active_events endpoint does not exist")
 
+    emergency_mode = update_stall_state(boxes)
+
     hubs = build_hubs(boxes)
     refresh_hub_scores(hubs, active_events)
 
+    log("STALL_TICKS", DISPATCH_STATE["stalled_ticks"])
+    log("EMERGENCY_MODE", emergency_mode)
     log("HUB_COUNT", len(hubs))
     for location, hub in hubs.items():
         log(

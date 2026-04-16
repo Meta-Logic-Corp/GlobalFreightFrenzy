@@ -1,12 +1,17 @@
 from simulator import VehicleType, haversine_distance_meters
+from math import ceil
 
 _PROXIMITY_M = 50.0
 _HUB_CLUSTER_RADIUS_M = 5000.0
 _DEST_CLUSTER_RADIUS_M = 80000.0
-_SHIP_MIN_BOXES = 80
-_TRAIN_MIN_BOXES = 40
-_AIR_MIN_DISTANCE_M = 1200000.0
-_AIR_MIN_BOXES = 35
+
+_TRAIN_MIN_BOXES = 80
+_SHIP_MIN_BOXES = 120
+_TRUCK_MAX_PREFERRED_BOXES = 70
+_DRONE_MAX_DIST_M = 30000.0
+_AIR_MIN_DIST_M = 1200000.0
+_AIR_MIN_BOXES = 40
+_LONG_HAUL_M = 300000.0
 
 
 def _distance_m(a, b):
@@ -26,25 +31,29 @@ def _avg_point(points):
     )
 
 
-def _cfg(vehicle_type_name):
-    return VehicleType[vehicle_type_name].value
+def _cfg(vtype):
+    return vtype.value
 
 
-def _capacity(vehicle_type_name):
-    return getattr(_cfg(vehicle_type_name), "capacity", 0)
+def _cfg_base_cost(vtype):
+    return getattr(vtype.value, "base_cost", 0.0)
 
 
-def _base_cost(vehicle_type):
-    return getattr(vehicle_type.value, "base_cost", 0.0)
+def _cfg_per_km_cost(vtype):
+    return getattr(vtype.value, "per_km_cost", 0.0)
 
 
-def _per_km_cost(vehicle_type):
-    return getattr(vehicle_type.value, "per_km_cost", 0.0)
-
-
-def _speed(vehicle_type):
-    cfg = vehicle_type.value
+def _cfg_speed(vtype):
+    cfg = vtype.value
     return getattr(cfg, "speed_km_h", getattr(cfg, "speed", 0.0))
+
+
+def _cfg_capacity_from_type(vtype):
+    return getattr(vtype.value, "capacity", 0)
+
+
+def _cfg_capacity_from_name(vehicle_type_name):
+    return getattr(VehicleType[vehicle_type_name].value, "capacity", 0)
 
 
 def _get_active_events(sim_state):
@@ -120,9 +129,10 @@ def _deliverable_here(vehicle, boxes):
     for bid in vehicle["cargo"]:
         if bid not in boxes:
             continue
-        if boxes[bid]["delivered"]:
+        box = boxes[bid]
+        if box["delivered"]:
             continue
-        if _distance_m(loc, boxes[bid]["destination"]) <= _PROXIMITY_M:
+        if _distance_m(loc, box["destination"]) <= _PROXIMITY_M:
             out.append(bid)
     return out
 
@@ -169,6 +179,7 @@ def _group_by_destination_region(box_ids, boxes):
 def _find_nearest_hub(point, hub_centers, exclude=None):
     best = None
     best_dist = float("inf")
+
     for hub in hub_centers:
         if exclude is not None and _distance_m(hub, exclude) <= _PROXIMITY_M:
             continue
@@ -176,6 +187,7 @@ def _find_nearest_hub(point, hub_centers, exclude=None):
         if d < best_dist:
             best_dist = d
             best = hub
+
     return best, best_dist
 
 
@@ -189,47 +201,141 @@ def _safe_create_vehicle(sim_state, vehicle_type, location):
         return None
 
 
-def _choose_vehicle_for_leg(sim_state, origin, target, box_count, prefer_ship=False):
-    events = _get_active_events(sim_state)
+def _cost_per_box_for_leg(vtype, origin, target, box_count):
+    capacity = max(_cfg_capacity_from_type(vtype), 1)
+    dist_km = _distance_km(origin, target)
+    trips = ceil(box_count / capacity)
+
+    total_cost = _cfg_base_cost(vtype) + (_cfg_per_km_cost(vtype) * dist_km * trips)
+    return total_cost / max(box_count, 1)
+
+
+def _score_vehicle_for_leg(vtype, origin, target, box_count, leg_kind):
     dist_m = _distance_m(origin, target)
     dist_km = dist_m / 1000.0
+    speed = max(_cfg_speed(vtype), 1.0)
+    capacity = max(_cfg_capacity_from_type(vtype), 1)
+    cost_per_box = _cost_per_box_for_leg(vtype, origin, target, box_count)
 
-    candidates = []
+    score = 1.0 / max(cost_per_box, 1e-6)
 
-    if prefer_ship and not _events_block("CargoShip", events) and box_count >= _SHIP_MIN_BOXES:
-        candidates.append(VehicleType.CargoShip)
+    utilization = min(box_count / capacity, 1.0)
+    score *= (0.5 + utilization)
 
-    if box_count >= _TRAIN_MIN_BOXES:
-        candidates.append(VehicleType.Train)
+    time_factor = speed / max(dist_km, 1.0)
+    score *= (1.0 + min(time_factor, 5.0) * 0.05)
 
-    candidates.append(VehicleType.SemiTruck)
+    if leg_kind == "land_final":
+        if vtype == VehicleType.Train:
+            if box_count >= _TRAIN_MIN_BOXES:
+                score *= 2.5
+            else:
+                score *= 0.35
+        elif vtype == VehicleType.SemiTruck:
+            if box_count <= _TRUCK_MAX_PREFERRED_BOXES:
+                score *= 1.8
+            else:
+                score *= 0.9
+        elif vtype == VehicleType.Airplane:
+            if dist_m >= _AIR_MIN_DIST_M and box_count >= _AIR_MIN_BOXES:
+                score *= 0.9
+            else:
+                score *= 0.08
+        elif vtype == VehicleType.Drone:
+            if box_count <= 5 and dist_m <= _DRONE_MAX_DIST_M:
+                score *= 1.1
+            else:
+                score *= 0.05
+        elif vtype == VehicleType.CargoShip:
+            score *= 0.01
 
-    if dist_m >= _AIR_MIN_DISTANCE_M and box_count >= _AIR_MIN_BOXES:
-        if not _events_block("Airplane", events):
-            candidates.append(VehicleType.Airplane)
+    elif leg_kind == "hub_transfer_ocean":
+        if vtype == VehicleType.CargoShip:
+            if box_count >= _SHIP_MIN_BOXES:
+                score *= 3.5
+            else:
+                score *= 0.4
+        elif vtype == VehicleType.Airplane:
+            if dist_m >= _AIR_MIN_DIST_M and box_count >= _AIR_MIN_BOXES:
+                score *= 0.7
+            else:
+                score *= 0.1
+        elif vtype == VehicleType.Train:
+            score *= 0.2
+        elif vtype == VehicleType.SemiTruck:
+            score *= 0.05
+        elif vtype == VehicleType.Drone:
+            score *= 0.01
 
-    if box_count <= 5 and dist_m <= 30000 and not _events_block("Drone", events):
-        candidates.append(VehicleType.Drone)
+    elif leg_kind == "hub_transfer_land":
+        if vtype == VehicleType.Train:
+            if box_count >= _TRAIN_MIN_BOXES:
+                score *= 3.0
+            else:
+                score *= 0.5
+        elif vtype == VehicleType.SemiTruck:
+            score *= 1.3
+        elif vtype == VehicleType.Airplane:
+            if dist_m >= _AIR_MIN_DIST_M and box_count >= _AIR_MIN_BOXES:
+                score *= 0.8
+            else:
+                score *= 0.1
+        elif vtype == VehicleType.CargoShip:
+            score *= 0.02
+        elif vtype == VehicleType.Drone:
+            score *= 0.03
 
-    scored = []
+    return score
+
+
+def _choose_vehicle_for_leg(sim_state, origin, target, box_count, leg_kind):
+    events = _get_active_events(sim_state)
+
+    if leg_kind == "hub_transfer_ocean":
+        candidates = [
+            VehicleType.CargoShip,
+            VehicleType.Airplane,
+        ]
+    elif leg_kind == "hub_transfer_land":
+        candidates = [
+            VehicleType.Train,
+            VehicleType.SemiTruck,
+            VehicleType.Airplane,
+        ]
+    else:
+        candidates = [
+            VehicleType.Train,
+            VehicleType.SemiTruck,
+            VehicleType.Airplane,
+            VehicleType.Drone,
+        ]
+
+    ranked = []
     for vtype in candidates:
-        cost = _base_cost(vtype) + _per_km_cost(vtype) * dist_km
-        speed = max(_speed(vtype), 1.0)
-        score = (box_count * speed) / max(cost, 1.0)
-        scored.append((score, vtype))
+        if _events_block(vtype.name, events):
+            continue
+        score = _score_vehicle_for_leg(vtype, origin, target, box_count, leg_kind)
+        ranked.append((score, vtype))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
+    ranked.sort(key=lambda x: x[0], reverse=True)
 
-    for _, vtype in scored:
+    for score, vtype in ranked:
         vid = _safe_create_vehicle(sim_state, vtype, origin)
         if vid is not None:
+            print(
+                f"selected {vtype.name} "
+                f"leg_kind={leg_kind} "
+                f"boxes={box_count} "
+                f"score={score:.6f} "
+                f"cost_per_box={_cost_per_box_for_leg(vtype, origin, target, box_count):.6f}"
+            )
             return vid
 
     return None
 
 
 def _load_up_to_capacity(sim_state, vid, vehicle, candidate_box_ids):
-    remaining = max(0, _capacity(vehicle["vehicle_type"]) - len(vehicle["cargo"]))
+    remaining = max(0, _cfg_capacity_from_name(vehicle["vehicle_type"]) - len(vehicle["cargo"]))
     if remaining <= 0:
         return 0
 
@@ -246,9 +352,31 @@ def _load_up_to_capacity(sim_state, vid, vehicle, candidate_box_ids):
         return 0
 
 
-def _choose_ship_transfer_target(hub_center, region_center, all_hub_centers):
-    target_hub, _ = _find_nearest_hub(region_center, all_hub_centers, exclude=hub_center)
-    return target_hub
+def _pick_loaded_vehicle_next_exact_destination(vehicle, boxes):
+    if not vehicle["cargo"]:
+        return None
+
+    groups = _group_by_exact_destination(vehicle["cargo"], boxes)
+    if not groups:
+        return None
+
+    return groups[0]["destination"]
+
+
+def _classify_transfer_leg(origin_hub, region_center, nearest_dest_hub):
+    if nearest_dest_hub is None:
+        return "land_final", region_center
+
+    direct_dist = _distance_m(origin_hub, region_center)
+    hub_to_hub_dist = _distance_m(origin_hub, nearest_dest_hub)
+
+    if direct_dist >= _LONG_HAUL_M and hub_to_hub_dist >= 100000.0:
+        return "hub_transfer_ocean", nearest_dest_hub
+
+    if hub_to_hub_dist >= 100000.0:
+        return "hub_transfer_land", nearest_dest_hub
+
+    return "land_final", region_center
 
 
 def _spawn_initial(sim_state):
@@ -272,51 +400,37 @@ def _spawn_initial(sim_state):
         region_center = best_region["center"]
         region_box_count = len(best_region["box_ids"])
 
-        nearest_dest_hub, nearest_dist = _find_nearest_hub(region_center, hub_centers, exclude=hub_center)
-
-        prefer_ship = False
-        planned_target = region_center
-
-        if nearest_dest_hub is not None:
-            origin_to_region = _distance_m(hub_center, region_center)
-            origin_to_hub = _distance_m(hub_center, nearest_dest_hub)
-
-            if origin_to_region > 300000 and origin_to_hub > 100000 and region_box_count >= _SHIP_MIN_BOXES:
-                prefer_ship = True
-                planned_target = nearest_dest_hub
+        nearest_dest_hub, _ = _find_nearest_hub(region_center, hub_centers, exclude=hub_center)
+        leg_kind, planned_target = _classify_transfer_leg(hub_center, region_center, nearest_dest_hub)
 
         vid = _choose_vehicle_for_leg(
             sim_state,
             hub_center,
             planned_target,
             region_box_count,
-            prefer_ship=prefer_ship,
+            leg_kind,
         )
         if vid is None:
             continue
 
         vehicles = sim_state.get_vehicles()
-        if vid not in vehicles:
+        vehicle = vehicles.get(vid)
+        if vehicle is None:
             continue
-        vehicle = vehicles[vid]
 
-        if prefer_ship:
-            candidate_ids = best_region["box_ids"]
-        else:
+        if leg_kind == "land_final":
             exact_groups = _group_by_exact_destination(waiting_ids, sim_state.get_boxes())
             candidate_ids = exact_groups[0]["box_ids"] if exact_groups else waiting_ids
+        else:
+            candidate_ids = best_region["box_ids"]
 
-        _load_up_to_capacity(sim_state, vid, vehicle, candidate_ids)
-
-        vehicles = sim_state.get_vehicles()
-        boxes = sim_state.get_boxes()
-        vehicle = vehicles.get(vid)
-        if not vehicle or not vehicle["cargo"]:
+        loaded = _load_up_to_capacity(sim_state, vid, vehicle, candidate_ids)
+        if loaded <= 0:
             continue
 
         try:
             sim_state.move_vehicle(vid, planned_target)
-            print(f"moving {vid} to {planned_target}")
+            print(f"moving {vid} to {planned_target} leg_kind={leg_kind}")
         except Exception as e:
             print(f"failed move {vid}: {e}")
 
@@ -340,12 +454,11 @@ def _manage_idle_vehicle(sim_state, vid, vehicle, all_hub_centers):
             return
 
     if vehicle["cargo"]:
-        groups = _group_by_exact_destination(vehicle["cargo"], boxes)
-        if groups:
-            next_dest = groups[0]["destination"]
+        next_dest = _pick_loaded_vehicle_next_exact_destination(vehicle, boxes)
+        if next_dest is not None:
             try:
                 sim_state.move_vehicle(vid, next_dest)
-                print(f"moving loaded {vid} to {next_dest}")
+                print(f"moving loaded {vid} to exact destination {next_dest}")
             except Exception as e:
                 print(f"failed move loaded {vid}: {e}")
         return
@@ -365,8 +478,8 @@ def _manage_idle_vehicle(sim_state, vid, vehicle, all_hub_centers):
     vehicle_type = vehicle["vehicle_type"]
 
     if vehicle_type == "CargoShip":
-        transfer_hub = _choose_ship_transfer_target(loc, region_center, all_hub_centers)
-        if transfer_hub is None:
+        nearest_dest_hub, _ = _find_nearest_hub(region_center, all_hub_centers, exclude=loc)
+        if nearest_dest_hub is None:
             return
 
         loaded = _load_up_to_capacity(sim_state, vid, vehicle, best_region["box_ids"])
@@ -374,32 +487,36 @@ def _manage_idle_vehicle(sim_state, vid, vehicle, all_hub_centers):
             return
 
         try:
-            sim_state.move_vehicle(vid, transfer_hub)
-            print(f"ship {vid} moving hub-to-hub {transfer_hub}")
+            sim_state.move_vehicle(vid, nearest_dest_hub)
+            print(f"ship {vid} moving hub-to-hub {nearest_dest_hub}")
         except Exception as e:
             print(f"failed ship move {vid}: {e}")
         return
 
-    exact_groups = _group_by_exact_destination(waiting_here, boxes)
-    if not exact_groups:
-        return
+    if vehicle_type in ("Train", "SemiTruck", "Airplane", "Drone"):
+        exact_groups = _group_by_exact_destination(waiting_here, boxes)
+        if not exact_groups:
+            return
 
-    loaded = _load_up_to_capacity(sim_state, vid, vehicle, exact_groups[0]["box_ids"])
-    if loaded <= 0:
-        return
+        loaded = _load_up_to_capacity(sim_state, vid, vehicle, exact_groups[0]["box_ids"])
+        if loaded <= 0:
+            return
 
-    vehicles = sim_state.get_vehicles()
-    boxes = sim_state.get_boxes()
-    vehicle = vehicles.get(vid)
-    if vehicle is None or not vehicle["cargo"]:
-        return
+        vehicles = sim_state.get_vehicles()
+        boxes = sim_state.get_boxes()
+        vehicle = vehicles.get(vid)
+        if vehicle is None or not vehicle["cargo"]:
+            return
 
-    next_dest = _group_by_exact_destination(vehicle["cargo"], boxes)[0]["destination"]
-    try:
-        sim_state.move_vehicle(vid, next_dest)
-        print(f"ground/air {vid} moving to {next_dest}")
-    except Exception as e:
-        print(f"failed move {vid}: {e}")
+        next_dest = _pick_loaded_vehicle_next_exact_destination(vehicle, boxes)
+        if next_dest is None:
+            return
+
+        try:
+            sim_state.move_vehicle(vid, next_dest)
+            print(f"{vehicle_type} {vid} moving to {next_dest}")
+        except Exception as e:
+            print(f"failed move {vehicle_type} {vid}: {e}")
 
 
 def _spawn_for_waiting_hubs(sim_state):
@@ -436,21 +553,14 @@ def _spawn_for_waiting_hubs(sim_state):
         region_box_count = len(best_region["box_ids"])
 
         nearest_dest_hub, _ = _find_nearest_hub(region_center, hub_centers, exclude=hub_center)
-
-        prefer_ship = False
-        planned_target = region_center
-
-        if nearest_dest_hub is not None:
-            if _distance_m(hub_center, region_center) > 300000 and region_box_count >= _SHIP_MIN_BOXES:
-                prefer_ship = True
-                planned_target = nearest_dest_hub
+        leg_kind, planned_target = _classify_transfer_leg(hub_center, region_center, nearest_dest_hub)
 
         vid = _choose_vehicle_for_leg(
             sim_state,
             hub_center,
             planned_target,
             region_box_count,
-            prefer_ship=prefer_ship,
+            leg_kind,
         )
         if vid is None:
             continue
@@ -460,11 +570,11 @@ def _spawn_for_waiting_hubs(sim_state):
         if vehicle is None:
             continue
 
-        if prefer_ship:
-            candidate_ids = best_region["box_ids"]
-        else:
+        if leg_kind == "land_final":
             exact_groups = _group_by_exact_destination(waiting_ids, sim_state.get_boxes())
             candidate_ids = exact_groups[0]["box_ids"] if exact_groups else waiting_ids
+        else:
+            candidate_ids = best_region["box_ids"]
 
         loaded = _load_up_to_capacity(sim_state, vid, vehicle, candidate_ids)
         if loaded <= 0:
@@ -472,13 +582,17 @@ def _spawn_for_waiting_hubs(sim_state):
 
         try:
             sim_state.move_vehicle(vid, planned_target)
-            print(f"new vehicle {vid} moving to {planned_target}")
+            print(f"new vehicle {vid} moving to {planned_target} leg_kind={leg_kind}")
         except Exception as e:
             print(f"failed move new vehicle {vid}: {e}")
 
 
 def step(sim_state):
-    print(f"tick={sim_state.tick} total_cost={sim_state.total_cost} terrain_penalty={getattr(sim_state, 'terrain_penalty', 'n/a')}")
+    print(
+        f"tick={sim_state.tick} "
+        f"total_cost={sim_state.total_cost} "
+        f"terrain_penalty={getattr(sim_state, 'terrain_penalty', 'n/a')}"
+    )
 
     if sim_state.tick == 0:
         _spawn_initial(sim_state)
