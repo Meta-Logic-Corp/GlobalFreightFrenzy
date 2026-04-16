@@ -91,7 +91,8 @@ def step(sim_state):
     # UNLOAD: Deliver boxes at destination
     for vid, v in vehicles.items():
         if v["destination"] is None and v["cargo"]:
-            to_unload = []
+            to_unload = [bid for bid in v["cargo"]
+                if distance_m(v["location"], boxes[bid]["destination"]) <= _PROXIMITY_M]
             for bid in v["cargo"]:
                 if haversine_distance_meters(v["location"], boxes[bid]["destination"]) <= _PROXIMITY_M:
                     to_unload.append(bid)
