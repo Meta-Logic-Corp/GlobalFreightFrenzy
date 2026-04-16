@@ -4,268 +4,197 @@ import math
 
 _PROXIMITY_M = 50.0
 
-# Vehicle capabilities
-VEHICLE_RESTRICTIONS = {
-    VehicleType.SemiTruck: {"terrain": "land", "spawn": "hub", "load_unload": "hub", "max_distance": None},
-    VehicleType.Train: {"terrain": "land", "spawn": "hub", "load_unload": "hub", "max_distance": None},
-    VehicleType.Airplane: {"terrain": "any", "spawn": "airport", "load_unload": "airport", "max_distance": None},
-    VehicleType.CargoShip: {"terrain": "water", "spawn": "ocean_port", "load_unload": "ocean_port", "max_distance": None},
-    VehicleType.Drone: {"terrain": "any", "spawn": "airport", "load_unload": "airport", "max_distance": 20000}
-}
-
-def is_water_crossing(from_loc, to_loc):
-    """Detect if a route requires crossing an ocean (overseas)."""
-    dist = haversine_distance_meters(from_loc, to_loc)
-    if dist > 500000:  # 500 km
-        return True
-    from_lat, from_lon = from_loc
-    to_lat, to_lon = to_loc
-    # Atlantic crossing
-    if (from_lon < -60 and to_lon > -10) or (from_lon > -10 and to_lon < -60):
-        if abs(from_lat - to_lat) < 50:
-            return True
-    # Pacific crossing
-    if (from_lon < -120 and to_lon > 120) or (from_lon > 120 and to_lon < -120):
-        return True
-    return False
-
-def can_vehicle_handle_route(vtype, from_loc, to_loc, num_boxes):
-    """Check if a vehicle can legally travel this route (capacity, distance)."""
-    if num_boxes > vtype.value.capacity:
-        return False
-    if VEHICLE_RESTRICTIONS[vtype]["max_distance"]:
-        dist = haversine_distance_meters(from_loc, to_loc)
-        if dist > VEHICLE_RESTRICTIONS[vtype]["max_distance"]:
-            return False
-    return True
+# Cache for waypoints (to avoid recomputing)
+_waypoint_cache = {}
 
 def nearest_facility(loc, facilities):
-    """Return the closest facility (airport/port/hub) to a location."""
     if not facilities:
         return None
     return min(facilities, key=lambda f: haversine_distance_meters(loc, f))
 
-def is_valid_operation_location(vtype, loc, sim_state):
-    """Check if a vehicle can load/unload at this location."""
-    if vtype in [VehicleType.SemiTruck, VehicleType.Train]:
-        hubs = sim_state.get_shipping_hubs()
-        return any(haversine_distance_meters(loc, h) <= 5000 for h in hubs)
-    elif vtype == VehicleType.Airplane:
-        airports = sim_state.get_airports()
-        if not airports:
-            airports = sim_state.get_shipping_hubs()
-        return any(haversine_distance_meters(loc, a) <= 5000 for a in airports)
-    elif vtype == VehicleType.CargoShip:
-        ports = sim_state.get_ocean_ports()
-        return any(haversine_distance_meters(loc, p) <= 5000 for p in ports)
-    return True
+def get_waypoint_pair(origin, dest, sim_state):
+    """Return (start_waypoint, end_waypoint) for an overseas route."""
+    key = (origin, dest)
+    if key in _waypoint_cache:
+        return _waypoint_cache[key]
+    
+    airports = sim_state.get_airports()
+    ports = sim_state.get_ocean_ports()
+    if not airports:
+        airports = sim_state.get_shipping_hubs()
+    
+    # Find nearest airport/port to origin and to destination
+    start_airport = nearest_facility(origin, airports)
+    start_port = nearest_facility(origin, ports)
+    end_airport = nearest_facility(dest, airports)
+    end_port = nearest_facility(dest, ports)
+    
+    # Choose the closest facility to origin
+    dist_start_air = haversine_distance_meters(origin, start_airport) if start_airport else float('inf')
+    dist_start_port = haversine_distance_meters(origin, start_port) if start_port else float('inf')
+    if dist_start_port < dist_start_air:
+        start_wp = start_port
+    else:
+        start_wp = start_airport
+    
+    # Choose the closest facility to destination
+    dist_end_air = haversine_distance_meters(dest, end_airport) if end_airport else float('inf')
+    dist_end_port = haversine_distance_meters(dest, end_port) if end_port else float('inf')
+    if dist_end_port < dist_end_air:
+        end_wp = end_port
+    else:
+        end_wp = end_airport
+    
+    _waypoint_cache[key] = (start_wp, end_wp)
+    return start_wp, end_wp
 
 def step(sim_state):
     tick = sim_state.tick
     vehicles = sim_state.get_vehicles()
     boxes = sim_state.get_boxes()
-
-    # Get real facility locations from the API
-    hubs = sim_state.get_shipping_hubs()
-    airports = sim_state.get_airports()
-    ocean_ports = sim_state.get_ocean_ports()
-    if not airports:
-        airports = hubs  # fallback
-
-    # ---------- 1. UNLOAD (with facility check) ----------
+    
+    # UNLOAD
     for vid, v in vehicles.items():
         if v["destination"] is None and v["cargo"]:
-            vtype = VehicleType[v["vehicle_type"]]
-            loc = v["location"]
-            if is_valid_operation_location(vtype, loc, sim_state):
-                to_unload = [bid for bid in v["cargo"] if haversine_distance_meters(loc, boxes[bid]["destination"]) <= _PROXIMITY_M]
-                if to_unload:
-                    sim_state.unload_vehicle(vid, to_unload)
-                    boxes = sim_state.get_boxes()
-            else:
-                # Not at valid facility – go to the nearest one
-                if vtype == VehicleType.Airplane:
-                    target = nearest_facility(loc, airports)
-                elif vtype == VehicleType.CargoShip:
-                    target = nearest_facility(loc, ocean_ports)
-                else:
-                    target = nearest_facility(loc, hubs)
-                if target:
-                    sim_state.move_vehicle(vid, target)
-
-    # ---------- 2. MANAGE VEHICLES (move, transfer) ----------
+            to_unload = [bid for bid in v["cargo"] if haversine_distance_meters(v["location"], boxes[bid]["destination"]) <= _PROXIMITY_M]
+            if to_unload:
+                sim_state.unload_vehicle(vid, to_unload)
+                boxes = sim_state.get_boxes()
+    
+    # MANAGE VEHICLES
     for vid, v in vehicles.items():
         if v["destination"] is not None:
             continue
         loc = v["location"]
         vtype = VehicleType[v["vehicle_type"]]
         capacity_left = vtype.value.capacity - len(v["cargo"])
-
-        # Load boxes at current location (if any)
+        
+        # Load
         if capacity_left > 0:
-            loadable = [
-                bid for bid, box in boxes.items()
-                if not box["delivered"] and box["vehicle_id"] is None
-                and haversine_distance_meters(loc, box["location"]) <= _PROXIMITY_M
-            ]
+            loadable = [bid for bid, box in boxes.items() if not box["delivered"] and box["vehicle_id"] is None and haversine_distance_meters(loc, box["location"]) <= _PROXIMITY_M]
             if loadable:
                 to_load = loadable[:capacity_left]
                 sim_state.load_vehicle(vid, to_load)
                 boxes = sim_state.get_boxes()
-
+        
         if v["cargo"]:
             first_bid = v["cargo"][0]
-            dest = boxes[first_bid]["destination"]
-            num_boxes = len(v["cargo"])
-
-            # --- Case 1: Vehicle can handle the whole route directly ---
-            if can_vehicle_handle_route(vtype, loc, dest, num_boxes):
-                sim_state.move_vehicle(vid, dest)
-
-            # --- Case 2: Land vehicle trying to go overseas -> go to port/airport ---
-            elif vtype in [VehicleType.SemiTruck, VehicleType.Train] and is_water_crossing(loc, dest):
-                # Find the nearest port or airport as a waypoint
-                port_dist = float('inf')
-                airport_dist = float('inf')
-                nearest_port = nearest_facility(loc, ocean_ports)
-                nearest_airport = nearest_facility(loc, airports)
-                if nearest_port:
-                    port_dist = haversine_distance_meters(loc, nearest_port)
-                if nearest_airport:
-                    airport_dist = haversine_distance_meters(loc, nearest_airport)
-
-                if port_dist < airport_dist and port_dist < 500000:
-                    waypoint = nearest_port
+            final_dest = boxes[first_bid]["destination"]
+            
+            # Check if this vehicle is a truck that has reached a waypoint (port/airport)
+            if vtype in [VehicleType.SemiTruck, VehicleType.Train]:
+                # If at a port or airport, and the final destination is overseas from here, transfer
+                airports = sim_state.get_airports()
+                ports = sim_state.get_ocean_ports()
+                if not airports:
+                    airports = sim_state.get_shipping_hubs()
+                at_airport = any(haversine_distance_meters(loc, a) <= 5000 for a in airports)
+                at_port = any(haversine_distance_meters(loc, p) <= 5000 for p in ports)
+                
+                if (at_airport or at_port) and haversine_distance_meters(loc, final_dest) > 500000:
+                    # Transfer to ship or plane
+                    cargo_copy = list(v["cargo"])
+                    sim_state.unload_vehicle(vid, cargo_copy)
+                    boxes = sim_state.get_boxes()
+                    # Get the waypoint on the other side
+                    _, end_wp = get_waypoint_pair(loc, final_dest, sim_state)
+                    # Spawn ship or plane
+                    if at_port:
+                        try:
+                            new_vid = sim_state.create_vehicle(VehicleType.CargoShip, loc)
+                            sim_state.load_vehicle(new_vid, cargo_copy)
+                            sim_state.move_vehicle(new_vid, end_wp if end_wp else final_dest)
+                        except ValueError:
+                            pass
+                    else:
+                        try:
+                            new_vid = sim_state.create_vehicle(VehicleType.Airplane, loc)
+                            sim_state.load_vehicle(new_vid, cargo_copy)
+                            sim_state.move_vehicle(new_vid, end_wp if end_wp else final_dest)
+                        except ValueError:
+                            pass
                 else:
-                    waypoint = nearest_airport if airport_dist < 500000 else None
-
-                if waypoint:
-                    sim_state.move_vehicle(vid, waypoint)
-                else:
-                    # fallback: go to any hub
-                    hub = nearest_facility(loc, hubs)
-                    if hub:
-                        sim_state.move_vehicle(vid, hub)
-
-            # --- Case 3: Water/air vehicle that has reached land -> transfer to land vehicle ---
-            elif vtype in [VehicleType.CargoShip, VehicleType.Airplane] and not is_water_crossing(loc, dest):
-                cargo_copy = list(v["cargo"])
-                dest_copy = dest
-                sim_state.unload_vehicle(vid, cargo_copy)
-                boxes = sim_state.get_boxes()
-                # Choose train for bulk, otherwise truck
-                land_type = VehicleType.Train if len(cargo_copy) >= 20 else VehicleType.SemiTruck
-                try:
-                    new_vid = sim_state.create_vehicle(land_type, loc)
-                    sim_state.load_vehicle(new_vid, cargo_copy)
-                    sim_state.move_vehicle(new_vid, dest_copy)
-                except ValueError:
-                    # fallback to truck
+                    # Normal truck movement
+                    sim_state.move_vehicle(vid, final_dest)
+            
+            elif vtype in [VehicleType.CargoShip, VehicleType.Airplane]:
+                # Check if we've reached the destination waypoint (port/airport near final destination)
+                airports = sim_state.get_airports()
+                ports = sim_state.get_ocean_ports()
+                if not airports:
+                    airports = sim_state.get_shipping_hubs()
+                at_airport = any(haversine_distance_meters(loc, a) <= 5000 for a in airports)
+                at_port = any(haversine_distance_meters(loc, p) <= 5000 for p in ports)
+                
+                # If at a facility and the final destination is close (not overseas), transfer to truck
+                if (at_airport or at_port) and haversine_distance_meters(loc, final_dest) < 500000:
+                    cargo_copy = list(v["cargo"])
+                    sim_state.unload_vehicle(vid, cargo_copy)
+                    boxes = sim_state.get_boxes()
                     try:
                         new_vid = sim_state.create_vehicle(VehicleType.SemiTruck, loc)
                         sim_state.load_vehicle(new_vid, cargo_copy)
-                        sim_state.move_vehicle(new_vid, dest_copy)
+                        sim_state.move_vehicle(new_vid, final_dest)
                     except ValueError:
-                        sim_state.move_vehicle(vid, dest_copy)
-
-            # --- Case 4: Other mismatches – go to nearest hub ---
-            else:
-                hub = nearest_facility(loc, hubs)
-                if hub:
-                    sim_state.move_vehicle(vid, hub)
+                        pass
                 else:
-                    sim_state.move_vehicle(vid, dest)
-
-        # Empty vehicle: go to nearest undelivered box or hub
+                    sim_state.move_vehicle(vid, final_dest)
+        
         elif not v["cargo"]:
-            nearest_box = None
+            # Empty vehicle: go to nearest box
+            nearest = None
             min_dist = float('inf')
             for bid, box in boxes.items():
                 if not box["delivered"] and box["vehicle_id"] is None:
                     dist = haversine_distance_meters(loc, box["location"])
                     if dist < min_dist:
                         min_dist = dist
-                        nearest_box = box["location"]
-            if nearest_box:
-                sim_state.move_vehicle(vid, nearest_box)
-            elif hubs:
-                sim_state.move_vehicle(vid, nearest_facility(loc, hubs))
-
-    # ---------- 3. SPAWN NEW VEHICLES ----------
-    if tick == 0 or (len(vehicles) < 15 and tick % 50 == 0):
+                        nearest = box["location"]
+            if nearest:
+                sim_state.move_vehicle(vid, nearest)
+    
+    # SPAWN
+    if tick == 0 or (len(vehicles) < 20 and tick % 50 == 0):
         undelivered = [bid for bid, box in boxes.items() if not box["delivered"] and box["vehicle_id"] is None]
         if undelivered:
             origin_boxes = defaultdict(list)
             for bid in undelivered:
                 origin_boxes[boxes[bid]["location"]].append(bid)
-
+            
             for origin, box_ids in origin_boxes.items():
                 num_boxes = len(box_ids)
-                needs_water = any(is_water_crossing(origin, boxes[bid]["destination"]) for bid in box_ids[:5])
-
-                if needs_water:
-                    # OVERSEAS: Only spawn a truck to go to a port/airport (waypoint), NOT directly to destination
-                    # Find the nearest port/airport
-                    port = nearest_facility(origin, ocean_ports)
-                    airport = nearest_facility(origin, airports)
-                    port_dist = haversine_distance_meters(origin, port) if port else float('inf')
-                    airport_dist = haversine_distance_meters(origin, airport) if airport else float('inf')
-
-                    if port_dist < airport_dist and port_dist < 500000:
-                        waypoint = port
-                    elif airport_dist < 500000:
-                        waypoint = airport
-                    else:
-                        waypoint = None
-
-                    if waypoint:
+                # Check if any box from this origin requires overseas travel
+                needs_overseas = any(haversine_distance_meters(origin, boxes[bid]["destination"]) > 500000 for bid in box_ids[:5])
+                
+                if needs_overseas:
+                    # Get the start waypoint (nearest port/airport)
+                    start_wp, _ = get_waypoint_pair(origin, boxes[box_ids[0]]["destination"], sim_state)
+                    if start_wp:
+                        # Spawn a truck to go to the start waypoint
                         try:
                             vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
-                            to_load = box_ids[:VehicleType.SemiTruck.value.capacity]
+                            to_load = box_ids[:50]
                             sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, waypoint)
+                            sim_state.move_vehicle(vid, start_wp)
                             break
                         except ValueError:
                             pass
-                    # If no waypoint found, try to spawn ship/plane directly at origin (if allowed)
-                    if num_boxes <= VehicleType.CargoShip.value.capacity:
-                        try:
-                            vid = sim_state.create_vehicle(VehicleType.CargoShip, origin)
-                            to_load = box_ids[:VehicleType.CargoShip.value.capacity]
-                            sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
-                            break
-                        except ValueError:
-                            pass
-                    if num_boxes <= VehicleType.Airplane.value.capacity:
-                        try:
-                            vid = sim_state.create_vehicle(VehicleType.Airplane, origin)
-                            to_load = box_ids[:VehicleType.Airplane.value.capacity]
-                            sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
-                            break
-                        except ValueError:
-                            pass
-                    # If everything fails, skip this origin (no truck spawned)
-                    continue
-
                 else:
-                    # LAND ROUTE
-                    if num_boxes >= 20 and num_boxes <= VehicleType.Train.value.capacity:
+                    # Land route: use train or truck
+                    if num_boxes >= 20:
                         try:
                             vid = sim_state.create_vehicle(VehicleType.Train, origin)
-                            to_load = box_ids[:VehicleType.Train.value.capacity]
+                            to_load = box_ids[:500]
                             sim_state.load_vehicle(vid, to_load)
                             sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
                             break
                         except ValueError:
                             pass
-                    if num_boxes <= VehicleType.SemiTruck.value.capacity:
-                        try:
-                            vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
-                            to_load = box_ids[:VehicleType.SemiTruck.value.capacity]
-                            sim_state.load_vehicle(vid, to_load)
-                            sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
-                            break
-                        except ValueError:
-                            continue
+                    try:
+                        vid = sim_state.create_vehicle(VehicleType.SemiTruck, origin)
+                        to_load = box_ids[:50]
+                        sim_state.load_vehicle(vid, to_load)
+                        sim_state.move_vehicle(vid, boxes[to_load[0]]["destination"])
+                        break
+                    except ValueError:
+                        continue
