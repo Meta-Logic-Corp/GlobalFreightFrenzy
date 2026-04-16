@@ -91,11 +91,9 @@ def step(sim_state):
     # UNLOAD: Deliver boxes at destination
     for vid, v in vehicles.items():
         if v["destination"] is None and v["cargo"]:
+            # FIX: Removed duplicate append loop; list comprehension is sufficient
             to_unload = [bid for bid in v["cargo"]
                 if haversine_distance_meters(v["location"], boxes[bid]["destination"]) <= _PROXIMITY_M]
-            for bid in v["cargo"]:
-                if haversine_distance_meters(v["location"], boxes[bid]["destination"]) <= _PROXIMITY_M:
-                    to_unload.append(bid)
             if to_unload:
                 sim_state.unload_vehicle(vid, to_unload)
                 boxes = sim_state.get_boxes()
@@ -145,7 +143,8 @@ def step(sim_state):
                         cargo_copy = list(v["cargo"])
                         target_dest = dest
 
-                        sims_state.unload_vehicle(vid, cargo_copy)
+                        # FIX: was `sims_state` (typo), now `sim_state`
+                        sim_state.unload_vehicle(vid, cargo_copy)
                         boxes = sim_state.get_boxes()
                         
                         # Try to create appropriate vehicle at hub
