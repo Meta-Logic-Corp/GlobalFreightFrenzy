@@ -1,3 +1,7 @@
+from simulator import VehicleType, haversine_distance_meters
+from collections import defaultdict
+import math
+
 def step(sim_state):
     tick = sim_state.tick
     vehicles = sim_state.get_vehicles()
