@@ -337,7 +337,7 @@ Moving a vehicle through its **forbidden terrain** (e.g. a SemiTruck over water)
 |--------------|-------------------|
 | `SemiTruck`, `Train` | Within **5 000 m** of a shipping hub |
 | `Airplane`, `Drone` | Within **5 000 m** of an airport (falls back to hub locations if no airports defined in bootstrap) |
-| `CargoShip` | Must be over **water** (ocean/sea), and within **5 000 m** of an ocean port when `ocean_ports` are defined |
+| `CargoShip` | Within **5 000 m** of an ocean port when `ocean_ports` are defined |
 
 Facility operation rules for cargo handling (`load_vehicle` / `unload_vehicle`):
 
@@ -354,7 +354,7 @@ These bootstrap fields drive spawn and cargo-operation restrictions:
 - `ocean_ports`: optional list of ocean-port locations used by `CargoShip`.
 
 If `airports` is omitted or empty, shipping hub locations are used as fallback airport locations.
-If `ocean_ports` is omitted or empty, cargo ships still must spawn over water, but no port-distance check is enforced.
+If `ocean_ports` is omitted or empty, cargo ships have no ocean-port distance check for spawning.
 
 Example:
 
