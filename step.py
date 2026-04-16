@@ -142,37 +142,39 @@ def step(sim_state):
                     
                     if nearest_hub:
                         # Unload current cargo first
-                        if v["cargo"]:
-                            sim_state.unload_vehicle(vid, v["cargo"])
-                            boxes = sim_state.get_boxes()
+                        cargo_copy = list(v["cargo"])
+                        target_dest = dest
+
+                        sims_state.unload_vehicle(vid, cargo_copy)
+                        boxes = sim_state.get_boxes()
                         
                         # Try to create appropriate vehicle at hub
                         if is_water_crossing(loc, dest):
                             # Try ship first
                             try:
                                 new_vid = sim_state.create_vehicle(VehicleType.CargoShip, nearest_hub)
-                                sim_state.load_vehicle(new_vid, v["cargo"])
-                                sim_state.move_vehicle(new_vid, dest)
+                                sim_state.load_vehicle(new_vid, cargo_copy)
+                                sim_state.move_vehicle(new_vid, target_dest)
                             except ValueError:
                                 # Try plane
                                 try:
                                     new_vid = sim_state.create_vehicle(VehicleType.Airplane, nearest_hub)
-                                    sim_state.load_vehicle(new_vid, v["cargo"])
-                                    sim_state.move_vehicle(new_vid, dest)
+                                    sim_state.load_vehicle(new_vid, cargo_copy)
+                                    sim_state.move_vehicle(new_vid, target_dest)
                                 except ValueError:
                                     # Send original truck
-                                    sim_state.move_vehicle(vid, dest)
+                                    sim_state.move_vehicle(vid, target_dest)
                         else:
                             # Try train for long land route
                             if num_boxes >= 20:
                                 try:
                                     new_vid = sim_state.create_vehicle(VehicleType.Train, nearest_hub)
-                                    sim_state.load_vehicle(new_vid, v["cargo"])
-                                    sim_state.move_vehicle(new_vid, dest)
+                                    sim_state.load_vehicle(new_vid, cargo_copy)
+                                    sim_state.move_vehicle(new_vid, target_dest)
                                 except ValueError:
-                                    sim_state.move_vehicle(vid, dest)
+                                    sim_state.move_vehicle(vid, target_dest)
                             else:
-                                sim_state.move_vehicle(vid, dest)
+                                sim_state.move_vehicle(vid, target_dest)
                     else:
                         sim_state.move_vehicle(vid, dest)
             
